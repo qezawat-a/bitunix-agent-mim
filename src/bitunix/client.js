@@ -11,11 +11,14 @@ export class BitunixClient {
   makeSign(path, body, queryParams = {}) {
     const nonce = Math.floor(Math.random() * 1000000000).toString();
     const timestamp = Date.now().toString();
-    const qs = Object.keys(queryParams)
+    const cleanParams = Object.fromEntries(
+      Object.entries(queryParams).filter(([, v]) => v !== '' && v !== undefined && v !== null)
+    );
+    const qs = Object.keys(cleanParams)
       .sort()
-      .map(k => `${k}=${queryParams[k]}`)
+      .map(k => `${k}=${cleanParams[k]}`)
       .join('');
-    const bodyStr = JSON.stringify(body).replace(/\s/g, '');
+    const bodyStr = body ? JSON.stringify(body).replace(/\s/g, '') : '';
     const digestInput = `${nonce}${timestamp}${this.apiKey}${qs}${bodyStr}`;
     const digest = BitunixClient.sha256(digestInput);
     const sign = BitunixClient.sha256(digest + this.secretKey);
@@ -28,7 +31,10 @@ export class BitunixClient {
       'language': 'en-US',
       ...this.makeSign(path, body, queryParams),
     };
-    const url = `${this.baseURL}${path}?${new URLSearchParams(queryParams)}`;
+    const cleanParams = Object.fromEntries(
+      Object.entries(queryParams).filter(([, v]) => v !== '' && v !== undefined && v !== null)
+    );
+    const url = `${this.baseURL}${path}?${new URLSearchParams(cleanParams)}`;
     const opts = {
       method,
       headers,
@@ -44,7 +50,11 @@ export class BitunixClient {
   }
 
   async getAccount(marginCoin = 'USDT') {
-    return this.request('GET', '/api/v1/futures/account', null, { marginCoin });
+    const data = await this.request('GET', '/api/v1/futures/account', null, { marginCoin });
+    if (Array.isArray(data)) {
+      return data.find((a) => a.marginCoin === marginCoin) || data[0] || {};
+    }
+    return data || {};
   }
 
   async getKlines(symbol, interval = '15m', limit = 200, startTime = 0, endTime = 0, type = 'LAST_PRICE') {
@@ -57,7 +67,7 @@ export class BitunixClient {
   }
 
   async getDepth(symbol) {
-    return this.request('GET', `/api/v1/futures/market/depth?symbol=${symbol}`, null, {});
+    return this.request('GET', '/api/v1/futures/market/depth', null, { symbol });
   }
 
   async placeOrder(params) {

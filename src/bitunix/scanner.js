@@ -22,8 +22,8 @@ class Scanner {
 
   async getFunding(symbol) {
     try {
-      const data = await this.client.getDepth(symbol);
-      return 0;
+      const data = await this.client.getFundingRate(symbol);
+      return typeof data?.value === 'number' ? data.value : 0;
     } catch { return 0; }
   }
 

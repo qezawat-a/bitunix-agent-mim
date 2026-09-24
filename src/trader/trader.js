@@ -40,7 +40,7 @@ export class Trader {
   }
 
   async openPosition(symbol, entryPrice, direction) {
-    const qty = this.computePositionSize(entryPrice);
+    const qty = await this.computePositionSize(entryPrice);
     const { tpPrice, slPrice, tpStopType, slStopType } = this.positionManager.computeTPSL(
       entryPrice, direction, null, CONFIG.min_confidence
     );
@@ -61,7 +61,7 @@ export class Trader {
       tradeSide: 'OPEN',
     };
     const order = await this.client.placeOrder(body);
-    this.state.positions.push({ positionId: order.orderId, symbol, side: body.side, entryPrice, direction });
+    this.state.positions.push({ positionId: order.orderId, symbol, side: body.side, entryPrice, direction, openedAt: Date.now() });
     return order;
   }
 
@@ -77,10 +77,12 @@ export class Trader {
     const now = Date.now();
     if (now < this.state.lastGuard + CONFIG.guard_interval_sec * 1000) return;
     await this.positionManager.fetchPositions();
-    for (const pos of this.state.positions) {
+    for (const pos of this.positionManager.state.positions) {
       await this.positionManager.checkLiquidationGuard(pos);
-      if (Math.random() < 0.05) {
+      if (now >= pos.openTime * 1000 + CONFIG.breakeven_threshold_pct * 60000) {
         await this.positionManager.checkBreakeven(pos);
+      }
+      if (now >= pos.openTime * 1000 + CONFIG.trailing_trigger_roi_pct * 60000) {
         await this.positionManager.checkTrailing(pos);
       }
     }
