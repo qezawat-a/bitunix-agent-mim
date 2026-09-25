@@ -10,6 +10,34 @@ export async function chat(messages, provider = 'openai', tools = [], options = 
   return chatGemini(messages, key, tools, options);
 }
 
+export function resolveOpenAiUrl(base = CONFIG.AI_BASE_URL) {
+  const configured = String(base || '').trim().replace(/\/+$/, '');
+  if (!configured) return 'https://api.openai.com/v1/chat/completions';
+  if (/\/chat\/completions$/i.test(configured)) return configured;
+  if (/\/v\d+$/i.test(configured)) return `${configured}/chat/completions`;
+  return `${configured}/v1/chat/completions`;
+}
+
+export function resolveOpenAiModelsUrl(base = CONFIG.AI_BASE_URL) {
+  let endpoint = resolveOpenAiUrl(base).replace(/\/+$/, '');
+  if (/\/chat\/completions$/i.test(endpoint)) endpoint = endpoint.replace(/\/chat\/completions$/i, '');
+  return `${endpoint}/models`;
+}
+
+export async function listOpenAiModels() {
+  if (!CONFIG.AI_API_KEY) throw new Error('OpenAI API key is not configured');
+  const url = resolveOpenAiModelsUrl();
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${CONFIG.AI_API_KEY}` },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!res.ok) throw new Error(`openai models ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const payload = await res.json();
+  const models = Array.isArray(payload) ? payload : payload.data;
+  if (!Array.isArray(models)) throw new Error('OpenAI models response is invalid');
+  return models.map(model => typeof model === 'string' ? model : model?.id).filter(Boolean);
+}
+
 function toolDefinitions(tools) {
   return (tools || []).filter(tool => tool && tool.name);
 }
@@ -118,7 +146,7 @@ function geminiMessages(messages) {
 }
 
 async function chatOpenAI(messages, key, tools, options) {
-  const url = CONFIG.AI_BASE_URL || 'https://api.openai.com/v1/chat/completions';
+  const url = resolveOpenAiUrl();
   const model = CONFIG.AI_MODEL && CONFIG.AI_MODEL !== 'AUTO' ? CONFIG.AI_MODEL : 'gpt-4o-mini';
   const body = { model, messages, max_tokens: 2048, temperature: 0.7 };
   const definitions = toOpenAIToolDefs(tools);
@@ -132,7 +160,14 @@ async function chatOpenAI(messages, key, tools, options) {
     body: JSON.stringify(body),
     signal: options.signal,
   });
-  if (!res.ok) throw new Error(`openai ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) {
+    let endpoint = url;
+    try {
+      const parsed = new URL(url);
+      endpoint = `${parsed.origin}${parsed.pathname}`;
+    } catch {}
+    throw new Error(`openai ${res.status} at ${endpoint} (model=${model}): ${(await res.text()).slice(0, 300)}`);
+  }
   const data = await res.json();
   const message = data.choices?.[0]?.message || {};
   return {

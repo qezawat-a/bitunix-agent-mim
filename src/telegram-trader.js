@@ -2,6 +2,8 @@ import { CONFIG, parseBoolean } from './config.js';
 import { sendMessage, isOwner, esc, formatSignalReport } from './telegram-bot.js';
 import { applySettings, getTraderSettings, parseSettingValue, validateSettings } from './trader/settings.js';
 import { parseThinkingLevel } from './agent/thinking.js';
+import { detectProviders } from './agent/config.js';
+import { listOpenAiModels } from './agent/brain.js';
 
 function usage(chatId, text) {
   return sendMessage(chatId, text).then(() => true);
@@ -165,7 +167,14 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           return true;
         }
         case 'models': {
-          await sendMessage(chatId, `openai: <code>${esc(CONFIG.AI_MODEL)}</code>\nanthropic: <code>${esc(CONFIG.ANTHROPIC_MODEL)}</code>\ngoogle: <code>${esc(CONFIG.GEMINI_MODEL)}</code>`);
+          const provider = detectProviders();
+          if (provider === 'openai') {
+            const models = await listOpenAiModels();
+            const configured = models.includes(CONFIG.AI_MODEL) ? 'configured' : 'not found';
+            await sendMessage(chatId, `<b>OpenAI-compatible models</b>\nconfigured: <code>${esc(CONFIG.AI_MODEL)}</code> (${configured})\n${models.slice(0, 40).map(model => `<code>${esc(model)}</code>`).join('\n')}`);
+          } else {
+            await sendMessage(chatId, `anthropic: <code>${esc(CONFIG.ANTHROPIC_MODEL)}</code>\ngoogle: <code>${esc(CONFIG.GEMINI_MODEL)}</code>`);
+          }
           return true;
         }
         case 'thinking': {

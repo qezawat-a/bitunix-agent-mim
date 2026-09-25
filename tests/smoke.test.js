@@ -20,7 +20,7 @@ import { PositionManager } from '../src/trader/position-manager.js';
 import { setPositionManager, setTraderInstances, traderTools } from '../src/trader/agent-tools.js';
 import { bitunixTools, setBitunixClient } from '../src/bitunix/futures-tools.js';
 import { detectProviders } from '../src/agent/config.js';
-import { chat } from '../src/agent/brain.js';
+import { chat, listOpenAiModels, resolveOpenAiModelsUrl, resolveOpenAiUrl } from '../src/agent/brain.js';
 import { createAgent } from '../src/agent/loop.js';
 import { stringifyToolResult, validateToolArguments } from '../src/agent/tools.js';
 import { splitHtml } from '../src/telegram-bot.js';
@@ -407,6 +407,22 @@ describe('tool safety', () => {
 });
 
 describe('provider and websocket safety', () => {
+  it('lists models from an OpenAI-compatible endpoint', async () => {
+    Object.assign(CONFIG, { AI_BASE_URL: 'https://example.test/v1', AI_API_KEY: 'test-key' });
+    globalThis.fetch = async url => {
+      assert.equal(url, 'https://example.test/v1/models');
+      return { ok: true, json: async () => ({ data: [{ id: 'model-a' }, { id: 'model-b' }] }) };
+    };
+    assert.deepEqual(await listOpenAiModels(), ['model-a', 'model-b']);
+    assert.equal(resolveOpenAiModelsUrl('https://example.test/v1'), 'https://example.test/v1/models');
+  });
+
+  it('normalizes OpenAI-compatible base URLs', () => {
+    assert.equal(resolveOpenAiUrl('https://api.openai.com/v1'), 'https://api.openai.com/v1/chat/completions');
+    assert.equal(resolveOpenAiUrl('https://openrouter.ai/api/v1/'), 'https://openrouter.ai/api/v1/chat/completions');
+    assert.equal(resolveOpenAiUrl('https://example.test/custom/chat/completions'), 'https://example.test/custom/chat/completions');
+  });
+
   it('auto-selects an available provider', () => {
     Object.assign(CONFIG, { AI_PROVIDER: 'auto', AI_API_KEY: '', ANTHROPIC_API_KEY: 'anthropic-key', GEMINI_API_KEY: '' });
     assert.equal(detectProviders(), 'anthropic');
