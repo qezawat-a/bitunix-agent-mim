@@ -8,19 +8,14 @@ function resolveSystem(agent) {
   return typeof agent.system === 'function' ? agent.system() : Promise.resolve(agent.system);
 }
 
-function cleanHistory(history, provider) {
+function cleanHistory(history) {
   return history
-    .filter(message => {
-      if (!message || typeof message !== 'object') return false;
-      if (provider === 'openai') return ['user', 'assistant', 'tool'].includes(message.role);
-      return ['user', 'assistant'].includes(message.role) && typeof message.content === 'string' && message.content.length > 0;
-    })
+    .filter(message => message && typeof message === 'object' && ['user', 'assistant', 'tool'].includes(message.role))
     .map(message => ({ ...message }));
 }
 
-function buildMessages(agent, provider, system) {
-  const hist = cleanHistory(agent.history.slice(-20), provider);
-  if (provider === 'openai') return [{ role: 'system', content: system }, ...hist];
+function buildMessages(agent, _provider, system) {
+  const hist = cleanHistory(agent.history.slice(-20));
   return [{ role: 'system', content: system }, ...hist];
 }
 
@@ -71,7 +66,7 @@ export async function say(agent, text) {
     return { role: 'assistant', content: reply };
   }
 
-  const useTools = provider === 'openai' && agent.tools.length > 0;
+  const useTools = agent.tools.length > 0;
   let finalText = '';
   const system = await resolveSystem(agent);
 
@@ -83,13 +78,11 @@ export async function say(agent, text) {
       const toolCalls = Array.isArray(res.toolCalls) ? res.toolCalls : [];
       if (!toolCalls.length) break;
 
-      if (provider === 'openai') {
-        agent.history.push({
-          role: 'assistant',
-          content: res.text || null,
-          tool_calls: toolCalls.map(call => ({ id: call.id, type: 'function', function: call.function })),
-        });
-      }
+      agent.history.push({
+        role: 'assistant',
+        content: res.text || null,
+        tool_calls: toolCalls.map(call => ({ id: call.id, type: 'function', function: call.function })),
+      });
       for (const call of toolCalls) {
         const name = call.function?.name || call.name;
         let result;
@@ -103,11 +96,7 @@ export async function say(agent, text) {
           result = { error: error.message || String(error) };
         }
         const content = stringifyToolResult(result);
-        if (provider === 'openai') {
-          agent.history.push({ role: 'tool', tool_call_id: call.id, content });
-        } else {
-          agent.history.push({ role: 'user', content: `[tool ${name} result]\n${content}` });
-        }
+        agent.history.push({ role: 'tool', tool_call_id: call.id, name, content });
       }
     }
   } catch (error) {

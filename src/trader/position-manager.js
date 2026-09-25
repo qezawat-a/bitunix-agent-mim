@@ -13,6 +13,7 @@ export class PositionManager {
   settings;
   state = { positions: [], lastManage: 0, lastGuard: 0, cooldownUntil: 0 };
   fetchInFlight = null;
+  protectionAttempts = new Map();
 
   constructor(client, _symbol, settings) {
     this.client = client;
@@ -164,10 +165,48 @@ export class PositionManager {
     return this.client.closePosition(this.symbol, position.positionId, position);
   }
 
+  async ensureProtection(position) {
+    if (this.currentStop(position)) return { skipped: 'protection already present' };
+    const key = String(position.positionId);
+    const lastAttempt = this.protectionAttempts.get(key) || 0;
+    if (Date.now() - lastAttempt < 60000) return { skipped: 'protection retry pending' };
+    this.protectionAttempts.set(key, Date.now());
+    const direction = position.side === 'BUY' ? 'bullish' : position.side === 'SELL' ? 'bearish' : null;
+    if (!direction) throw new Error(`position ${key} has an invalid side for TP/SL`);
+    try {
+      if (!this.settings.dry_run) {
+        const pending = await this.client.getPendingTPSL(this.symbol);
+        if (!Array.isArray(pending)) throw new Error('pending TP/SL response must be an array');
+        const existing = pending.find(item => String(item.positionId) === key && finitePositive(item.slPrice ?? item.stopPrice));
+        if (existing) return { verified: true, result: existing };
+      }
+      const result = await this.placeTPSL(position.positionId, Number(position.avgPrice), direction, position.atr, this.settings.min_confidence);
+      return { placed: true, result };
+    } catch (error) {
+      if (this.settings.on_tpsl_failure === 'close' && !this.settings.dry_run) {
+        const closeResult = await this.client.closePosition(this.symbol, position.positionId, position);
+        return { closed: true, result: closeResult, error: error.message };
+      }
+      throw new Error(`TP/SL protection failed: ${error.message}`);
+    }
+  }
+
   async midManage() {
     await this.fetchPositions();
     const errors = [];
     for (const position of this.state.positions) {
+      let protectionFailed = false;
+      try {
+        const protection = await this.ensureProtection(position);
+        if (protection?.closed) {
+          this.state.cooldownUntil = Date.now() + Number(this.settings.cooldown_minutes) * 60000;
+          continue;
+        }
+      } catch (error) {
+        errors.push({ positionId: position.positionId, message: error.message });
+        protectionFailed = true;
+      }
+      if (protectionFailed) continue;
       try {
         const breakeven = await this.checkBreakeven(position);
         if (breakeven?.slPrice) position.slPrice = breakeven.slPrice;

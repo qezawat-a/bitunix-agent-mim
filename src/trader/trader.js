@@ -24,6 +24,7 @@ export class Trader {
   entryInFlight = new Set();
   guardInFlight = null;
   manageInFlight = null;
+  privateRefreshInFlight = null;
 
   constructor(client) {
     this.client = client;
@@ -53,6 +54,25 @@ export class Trader {
     const count = current?.signal === signal ? current.count + 1 : 1;
     this.state.confirmations.set(symbol, { signal, count });
     return count;
+  }
+
+  async verifyAccountSettings() {
+    if (CONFIG.dry_run) return { skipped: 'dry_run' };
+    const [account, leverageData] = await Promise.all([
+      this.client.getAccount('USDT'),
+      this.client.getLeverageAndMarginMode(CONFIG.symbol),
+    ]);
+    const leverageRecord = Array.isArray(leverageData) ? leverageData[0] : leverageData;
+    const leverageValue = Number(leverageRecord?.leverage ?? leverageRecord?.marginLeverage);
+    if (Number.isFinite(leverageValue) && leverageValue !== CONFIG.leverage) {
+      throw new Error(`exchange leverage ${leverageValue} does not match configured leverage ${CONFIG.leverage}`);
+    }
+    const exchangeMode = String(account?.positionMode ?? account?.position_mode ?? '').toUpperCase();
+    const configuredMode = CONFIG.position_mode === 'hedge' ? 'HEDGE' : 'ONE_WAY';
+    if (exchangeMode && exchangeMode !== configuredMode) {
+      throw new Error(`exchange position mode ${exchangeMode} does not match configured mode ${configuredMode}`);
+    }
+    return { checked: true, leverage: Number.isFinite(leverageValue) ? leverageValue : null, positionMode: exchangeMode || null };
   }
 
   async scanAndOpen() {
@@ -130,7 +150,13 @@ export class Trader {
       this.state.orderUnknownUntil = Date.now() + Math.max(Number(CONFIG.cooldown_minutes) * 60000, 300000);
       throw error;
     }
-    await this.reconcilePositions();
+    const positions = await this.reconcilePositions();
+    try {
+      for (const position of positions) await this.positionManager.ensureProtection(position);
+    } catch (error) {
+      this.state.orderUnknownUntil = Date.now() + Math.max(Number(CONFIG.cooldown_minutes) * 60000, 300000);
+      throw error;
+    }
     return order;
   }
 
@@ -188,6 +214,16 @@ export class Trader {
       return errors;
     } finally {
       this.manageInFlight = null;
+    }
+  }
+
+  async handlePrivateEvent() {
+    if (this.privateRefreshInFlight) return this.privateRefreshInFlight;
+    this.privateRefreshInFlight = this.reconcilePositions();
+    try {
+      return await this.privateRefreshInFlight;
+    } finally {
+      this.privateRefreshInFlight = null;
     }
   }
 

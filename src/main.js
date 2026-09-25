@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import http from 'http';
-import { CONFIG, validate } from './config.js';
+import { CONFIG, validate, readSettingsFile, applySettingsFile } from './config.js';
 import { BitunixClient } from './bitunix/client.js';
 import { BitunixWs } from './bitunix/ws.js';
 import Scanner from './bitunix/scanner.js';
@@ -16,11 +16,19 @@ import { traderTools } from './trader/agent-tools.js';
 import { bitunixTools } from './bitunix/futures-tools.js';
 import { Memory } from './agent/memory.js';
 import { listSkills } from './agent/skills.js';
+import { loadMcpTools, disposeMcpTools } from './agent/mcp.js';
 import { loadStore, saveStore, closePersist } from './store/persist.js';
 import { loadSession, saveSession } from './session-store.js';
 import { applyPersistedSettings, getPersistentSettings, getTraderSettings, validateSettings } from './trader/settings.js';
 
 async function main() {
+  let fileSettings = {};
+  try {
+    fileSettings = await readSettingsFile();
+    applySettingsFile(CONFIG, fileSettings);
+  } catch (error) {
+    console.warn('[warn] ignoring settings.json:', error.message);
+  }
   const missing = validate();
   if (missing.length) console.warn('[warn] missing env:', missing.join(', '));
   const configErrors = validateSettings(getTraderSettings(CONFIG));
@@ -46,10 +54,12 @@ async function main() {
   const memory = new Memory();
   await memory.load();
   const skills = await listSkills();
+  const mcpServers = Array.isArray(fileSettings.mcp?.servers) ? fileSettings.mcp.servers : [];
+  const mcpTools = await loadMcpTools(mcpServers);
   setBasicMemory(memory);
-  const tools = [...basicTools, ...traderTools, ...bitunixTools];
+  const tools = [...basicTools, ...traderTools, ...bitunixTools, ...mcpTools];
   const getSystem = () => buildSystemPrompt({ skills, tools, memory: memory.all() });
-  const agent = createAgent({ system: getSystem, tools, memory, maxRounds: CONFIG.AGENT_MAX_STEP, history: [], autoCompact: true, thinkingLevel: 'mid' });
+  const agent = createAgent({ system: getSystem, tools, memory, maxRounds: CONFIG.AGENT_MAX_STEP, history: [], autoCompact: true, thinkingLevel: CONFIG.AGENT_THINKING_LEVEL });
 
   const { handleCommand, scanState, reportState } = createTraderCommands({
     client,
@@ -60,7 +70,20 @@ async function main() {
     saveSession,
   });
 
-  const ws = new BitunixWs({ onPublic: () => {}, onPrivate: () => {} });
+  if (!CONFIG.dry_run && CONFIG.BITUNIX_API_KEY) {
+    try {
+      await trader.verifyAccountSettings();
+    } catch (error) {
+      CONFIG.auto_trade = false;
+      scanState.scanOn = false;
+      console.error('[safety] account settings verification failed:', error.message);
+    }
+  }
+
+  const ws = new BitunixWs({
+    onPublic: () => {},
+    onPrivate: () => { trader.handlePrivateEvent().catch(error => console.error('private state refresh error:', error.message)); },
+  });
   try { ws.connectPublic(['tickers']); } catch {}
   if (CONFIG.BITUNIX_API_KEY) {
     try { ws.connectPrivate(['balance', 'order', 'position', 'tp_sl']); } catch {}
@@ -150,6 +173,7 @@ async function main() {
     if (scanTimer) clearTimeout(scanTimer);
     try { await saveStore({ settings: getPersistentSettings(CONFIG) }); } catch (error) { console.error('shutdown save error:', error.message); }
     try { ws.close(); } catch {}
+    try { disposeMcpTools(); } catch {}
     try { await closePersist(); } catch {}
     try { server.close(); } catch {}
   };

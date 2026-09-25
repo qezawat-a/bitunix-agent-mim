@@ -4,7 +4,7 @@ export const DEFAULTS = {
   symbol: 'BTCUSDT',
   leverage: 10,
   position_type: 'crossed',
-  timeframes: ['1m', '5m', '15m', '1h'],
+  timeframes: ['1m', '3m', '5m', '15m', '1h'],
   margin_amount_pct: 2,
   margin_risk_pct: 2,
   min_confidence: 80,

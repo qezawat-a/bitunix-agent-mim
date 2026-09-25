@@ -11,7 +11,7 @@ import {
   validateSettings,
 } from '../src/trader/settings.js';
 import { parseThinkingLevel } from '../src/agent/thinking.js';
-import { CONFIG, parseBoolean } from '../src/config.js';
+import { CONFIG, parseBoolean, applySettingsFile } from '../src/config.js';
 import { BitunixClient } from '../src/bitunix/client.js';
 import Scanner from '../src/bitunix/scanner.js';
 import { liqDistanceOk } from '../src/bitunix/risk.js';
@@ -20,6 +20,8 @@ import { PositionManager } from '../src/trader/position-manager.js';
 import { setPositionManager, setTraderInstances, traderTools } from '../src/trader/agent-tools.js';
 import { bitunixTools, setBitunixClient } from '../src/bitunix/futures-tools.js';
 import { detectProviders } from '../src/agent/config.js';
+import { chat } from '../src/agent/brain.js';
+import { createAgent } from '../src/agent/loop.js';
 import { stringifyToolResult, validateToolArguments } from '../src/agent/tools.js';
 import { splitHtml } from '../src/telegram-bot.js';
 import { BitunixWs } from '../src/bitunix/ws.js';
@@ -84,6 +86,7 @@ describe('settings', () => {
   it('normalize fills defaults', () => {
     const s = normalizeSettings({});
     assert.equal(s.symbol, 'BTCUSDT');
+    assert.ok(s.timeframes.includes('3m'));
     assert.ok(s.min_confidence === 80);
   });
 
@@ -256,6 +259,30 @@ describe('exchange safety', () => {
     assert.equal(results.filter(Boolean).length, 1);
   });
 
+  it('verifies exchange account settings before live trading', async () => {
+    const trader = new Trader({
+      getAccount: async () => ({ positionMode: 'HEDGE' }),
+      getLeverageAndMarginMode: async () => ({ leverage: CONFIG.leverage }),
+    });
+    CONFIG.dry_run = false;
+    await trader.verifyAccountSettings();
+    const mismatched = new Trader({
+      getAccount: async () => ({ positionMode: 'HEDGE' }),
+      getLeverageAndMarginMode: async () => ({ leverage: CONFIG.leverage + 1 }),
+    });
+    await assert.rejects(() => mismatched.verifyAccountSettings(), /does not match/);
+  });
+
+  it('places missing TP/SL protection after a fill', async () => {
+    const calls = [];
+    const client = { getPendingTPSL: async () => [], placeTPSL: async params => { calls.push(params); return { orderId: 'sl-1' }; } };
+    const pm = new PositionManager(client, 'BTCUSDT', { ...getTraderSettings(CONFIG), dry_run: false });
+    const result = await pm.ensureProtection(fakePosition({ slPrice: undefined }));
+    assert.equal(result.placed, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].positionId, 'p1');
+  });
+
   it('targets one position and honors dry-run for management', async () => {
     const calls = [];
     const client = {
@@ -318,6 +345,40 @@ describe('provider and websocket safety', () => {
   it('auto-selects an available provider', () => {
     Object.assign(CONFIG, { AI_PROVIDER: 'auto', AI_API_KEY: '', ANTHROPIC_API_KEY: 'anthropic-key', GEMINI_API_KEY: '' });
     assert.equal(detectProviders(), 'anthropic');
+  });
+
+  it('sends system and tool definitions to Anthropic and Gemini', async () => {
+    const bodies = [];
+    globalThis.fetch = async (_url, options) => {
+      bodies.push(JSON.parse(options.body));
+      return { ok: true, json: async () => ({ content: [{ type: 'text', text: 'ok' }] }) };
+    };
+    Object.assign(CONFIG, { ANTHROPIC_API_KEY: 'anthropic-key', GEMINI_API_KEY: 'gemini-key' });
+    const tools = [{ name: 'probe', description: 'probe', parameters: { type: 'object', properties: {} } }];
+    await chat([{ role: 'system', content: 'rules' }, { role: 'user', content: 'hello' }], 'anthropic', tools);
+    await chat([{ role: 'system', content: 'rules' }, { role: 'user', content: 'hello' }], 'google', tools);
+    assert.equal(bodies[0].system, 'rules');
+    assert.equal(bodies[0].tools[0].name, 'probe');
+    assert.equal(bodies[1].systemInstruction.parts[0].text, 'rules');
+    assert.equal(bodies[1].tools[0].functionDeclarations[0].name, 'probe');
+  });
+
+  it('executes Anthropic tool calls through the shared loop', async () => {
+    let calls = 0;
+    let round = 0;
+    Object.assign(CONFIG, { AI_PROVIDER: 'anthropic', AI_API_KEY: '', ANTHROPIC_API_KEY: 'anthropic-key', GEMINI_API_KEY: '' });
+    globalThis.fetch = async () => {
+      round += 1;
+      return { ok: true, json: async () => round === 1 ? { content: [{ type: 'tool_use', id: 'call-1', name: 'probe', input: { value: 1 } }] } : { content: [{ type: 'text', text: 'done' }] } };
+    };
+    const agent = createAgent({
+      system: 'rules',
+      tools: [{ name: 'probe', parameters: { type: 'object', properties: { value: { type: 'number' } }, required: ['value'] }, handler: async () => { calls += 1; return { ok: true }; } }],
+      maxRounds: 3,
+    });
+    const result = await agent.say('run probe');
+    assert.equal(calls, 1);
+    assert.equal(result.content, 'done');
   });
 
   it('does not reconnect a socket after close', () => {
