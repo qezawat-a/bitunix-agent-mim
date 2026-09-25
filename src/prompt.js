@@ -1,5 +1,29 @@
 import fs from 'fs/promises';
+import path from 'path';
 import { CONFIG } from './config.js';
+
+const SOUL_FILE = path.resolve('soul/SOUL.md');
+
+export async function readSoul() {
+  return fs.readFile(SOUL_FILE, 'utf8');
+}
+
+export async function writeSoul(content) {
+  const text = String(content || '').trim();
+  if (!text) throw new Error('soul content cannot be empty');
+  await fs.mkdir(path.dirname(SOUL_FILE), { recursive: true });
+  const temporary = `${SOUL_FILE}.${process.pid}.tmp`;
+  await fs.writeFile(temporary, text, 'utf8');
+  await fs.rename(temporary, SOUL_FILE);
+  return text;
+}
+
+export async function appendSoul(content) {
+  const addition = String(content || '').trim();
+  if (!addition) throw new Error('soul content cannot be empty');
+  const current = await readSoul().catch(() => '');
+  return writeSoul(`${current.trim()}\n\n${addition}`);
+}
 
 function safeMemory(memory) {
   const entries = Object.entries(memory && typeof memory === 'object' ? memory : {})
@@ -14,10 +38,13 @@ function safeMemory(memory) {
 export async function buildSystemPrompt({ skills = [], tools = [], memory = {} } = {}) {
   let soul = '';
   let style = '';
-  try { soul = await fs.readFile('soul/SOUL.md', 'utf8'); } catch {}
+  try { soul = await readSoul(); } catch {}
   try { style = await fs.readFile('soul/STYLE.md', 'utf8'); } catch {}
 
-  const skillBlock = skills.map(skill => `## Skill: ${skill.name}\n${skill.content}`).join('\n\n');
+  const disabled = new Set(Array.isArray(memory.disabled_skills) ? memory.disabled_skills : []);
+  const active = Array.isArray(memory.active_skills) && memory.active_skills.length ? new Set(memory.active_skills) : null;
+  const selectedSkills = skills.filter(skill => !disabled.has(skill.id) && (!active || active.has(skill.id)));
+  const skillBlock = selectedSkills.map(skill => `## Skill: ${skill.name}\n${skill.content}`).join('\n\n');
   const toolBlock = tools.map(tool => `- ${tool.name}: ${tool.description}`).join('\n');
   const memBlock = safeMemory(memory).map(([key, value]) => `${key}: ${JSON.stringify(value)}`).join('\n');
 

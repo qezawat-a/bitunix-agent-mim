@@ -1,4 +1,5 @@
 import Scanner from '../bitunix/scanner.js';
+import { strictListFromData } from '../bitunix/client.js';
 import { PositionManager } from './position-manager.js';
 import { CONFIG } from '../config.js';
 
@@ -65,11 +66,12 @@ export class Trader {
       this.client.getPositionMode(),
     ]);
     const leverageRecord = Array.isArray(leverageData) ? leverageData[0] : leverageData;
+    const positionModeRecord = Array.isArray(positionModeData) ? positionModeData[0] : positionModeData;
     const leverageValue = Number(leverageRecord?.leverage ?? leverageRecord?.marginLeverage);
     if (Number.isFinite(leverageValue) && leverageValue !== CONFIG.leverage) {
       throw new Error(`exchange leverage ${leverageValue} does not match configured leverage ${CONFIG.leverage}`);
     }
-    const exchangeMode = String(positionModeData?.positionMode ?? account?.positionMode ?? account?.position_mode ?? '').toUpperCase();
+    const exchangeMode = String(positionModeRecord?.positionMode ?? account?.positionMode ?? account?.position_mode ?? '').toUpperCase();
     const configuredMode = CONFIG.position_mode === 'hedge' ? 'HEDGE' : 'ONE_WAY';
     if (exchangeMode && exchangeMode !== configuredMode) {
       throw new Error(`exchange position mode ${exchangeMode} does not match configured mode ${configuredMode}`);
@@ -88,10 +90,12 @@ export class Trader {
       this.client.getPendingPositions(CONFIG.symbol),
       this.client.getPendingOrders(CONFIG.symbol),
     ]);
-    if (!Array.isArray(positions) || !Array.isArray(orders)) throw new Error('exchange exposure state is invalid');
+    const positionList = strictListFromData(positions);
+    const orderList = strictListFromData(orders, ['orderList']);
+    if (!Array.isArray(positionList) || !Array.isArray(orderList)) throw new Error('exchange exposure state is invalid');
     const current = await this.verifyAccountSettings();
     if (!apply) return { ...current, applied: false };
-    if (positions.length || orders.length) return { ...current, applied: false, skipped: 'open_exposure' };
+    if (positionList.length || orderList.length) return { ...current, applied: false, skipped: 'open_exposure' };
 
     const [leverageData, positionModeData] = await Promise.all([
       this.client.getLeverageAndMarginMode(CONFIG.symbol),
@@ -103,7 +107,8 @@ export class Trader {
     const marginMode = String(leverageRecord?.marginMode || '').toUpperCase();
     const configuredMarginMode = CONFIG.position_type === 'isolated' ? 'ISOLATION' : 'CROSS';
     if (marginMode && marginMode !== configuredMarginMode) await this.client.changeMarginMode(CONFIG.symbol, CONFIG.position_type);
-    const exchangeMode = String(positionModeData?.positionMode || '').toUpperCase();
+    const positionModeRecord = Array.isArray(positionModeData) ? positionModeData[0] : positionModeData;
+    const exchangeMode = String(positionModeRecord?.positionMode || '').toUpperCase();
     const configuredMode = CONFIG.position_mode === 'hedge' ? 'HEDGE' : 'ONE_WAY';
     if (exchangeMode && exchangeMode !== configuredMode) await this.client.changePositionMode(CONFIG.position_mode);
     return { ...(await this.verifyAccountSettings()), applied: true };
@@ -158,8 +163,10 @@ export class Trader {
       this.client.getHistoryOrders(symbol),
     ]);
     for (const result of results) {
-      if (result.status !== 'fulfilled' || !Array.isArray(result.value)) continue;
-      const match = result.value.find(order => String(order.clientId || order.client_id || '') === clientId);
+      if (result.status !== 'fulfilled') continue;
+      const orders = strictListFromData(result.value, ['orderList']);
+      if (!orders) continue;
+      const match = orders.find(order => String(order.clientId || order.client_id || '') === clientId);
       if (match) return match;
     }
     return null;

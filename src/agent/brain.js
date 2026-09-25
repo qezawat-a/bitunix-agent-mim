@@ -38,15 +38,28 @@ export async function listOpenAiModels(signal) {
   return models.map(model => typeof model === 'string' ? model : model?.id).filter(Boolean);
 }
 
-let autoModelState = { key: null, model: null };
+let autoModelState = { key: null, model: null, expiresAt: 0 };
+const providerAutoState = {
+  anthropic: { key: null, model: null, expiresAt: 0 },
+  google: { key: null, model: null, expiresAt: 0 },
+};
+
+export function resetOpenAiModelCache() {
+  autoModelState = { key: null, model: null, expiresAt: 0 };
+  for (const state of Object.values(providerAutoState)) {
+    state.key = null;
+    state.model = null;
+    state.expiresAt = 0;
+  }
+}
 
 function rankDiscoveredModels(models) {
-  const blocked = /embed|whisper|tts|audio|dall|image|moderation|rerank|realtime|omni|fine-tune|guard/i;
-  const preferred = /free|flash|mini|lite|nano|small|distil/i;
-  const usable = models.filter(model => !blocked.test(model));
+  const blocked = /embed|whisper|tts|audio|dall|image|moderation|rerank|realtime|omni|fine-tune|guard|vision/i;
+  const preferred = /flash|mini|lite|nano|small|distil|haiku|sonnet/i;
+  const usable = [...new Set(models.filter(model => model && !blocked.test(String(model))))];
   return [
     ...usable.filter(model => /:free$/i.test(model)),
-    ...usable.filter(model => preferred.test(model)),
+    ...usable.filter(model => preferred.test(model) && !/:free$/i.test(model)),
     ...usable.filter(model => !/:free$/i.test(model) && !preferred.test(model)),
   ];
 }
@@ -66,18 +79,125 @@ async function probeOpenAiModel(model, signal) {
 async function resolveOpenAiModel(signal) {
   const configured = String(CONFIG.AI_MODEL || '').trim();
   if (configured && configured.toUpperCase() !== 'AUTO') return configured;
-  const key = `${resolveOpenAiUrl()}|${CONFIG.AI_API_KEY ? 'configured' : 'missing'}`;
-  if (autoModelState.key === key && autoModelState.model) return autoModelState.model;
+  const key = `${resolveOpenAiUrl()}|${CONFIG.AI_API_KEY || 'missing'}`;
+  if (autoModelState.key === key && autoModelState.model && (!CONFIG.AI_AUTO_REFRESH || Date.now() < autoModelState.expiresAt)) return autoModelState.model;
   const models = rankDiscoveredModels(await listOpenAiModels(signal));
   for (const candidate of models.slice(0, 10)) {
     try {
       if (await probeOpenAiModel(candidate, signal)) {
-        autoModelState = { key, model: candidate };
+        autoModelState = { key, model: candidate, expiresAt: Date.now() + Math.max(1000, Number(CONFIG.AI_MODEL_TTL) || 600000) };
         return candidate;
       }
     } catch {}
   }
   throw new Error('No discovered model passed the availability probe; set AI_MODEL explicitly');
+}
+
+export function resolveAnthropicUrl(base = CONFIG.ANTHROPIC_BASE_URL) {
+  const configured = String(base || '').trim().replace(/\/+$/, '');
+  if (!configured) return 'https://api.anthropic.com/v1/messages';
+  if (/\/messages$/i.test(configured)) return configured;
+  if (/\/v\d+$/i.test(configured)) return `${configured}/messages`;
+  return `${configured}/v1/messages`;
+}
+
+export function resolveAnthropicModelsUrl(base = CONFIG.ANTHROPIC_BASE_URL) {
+  let endpoint = resolveAnthropicUrl(base).replace(/\/+$/, '');
+  endpoint = endpoint.replace(/\/messages$/i, '');
+  return `${endpoint}/models`;
+}
+
+export async function listAnthropicModels(signal) {
+  if (!CONFIG.ANTHROPIC_API_KEY) throw new Error('Anthropic API key is not configured');
+  const res = await fetch(resolveAnthropicModelsUrl(), {
+    headers: {
+      'x-api-key': CONFIG.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+    },
+    signal: signal ?? AbortSignal.timeout(15000),
+  });
+  if (!res.ok) throw new Error(`anthropic models ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const payload = await res.json();
+  const models = Array.isArray(payload) ? payload : payload.data;
+  if (!Array.isArray(models)) throw new Error('Anthropic models response is invalid');
+  return models.map(model => typeof model === 'string' ? model : model?.id).filter(Boolean);
+}
+
+export function resolveGeminiBase(base = CONFIG.GEMINI_BASE_URL) {
+  const configured = String(base || 'https://generativelanguage.googleapis.com').trim().replace(/\/+$/, '');
+  return /\/v\d+(?:beta\d+)?$/i.test(configured) ? configured : `${configured}/v1beta`;
+}
+
+export function resolveGeminiModelsUrl(base = CONFIG.GEMINI_BASE_URL) {
+  return `${resolveGeminiBase(base)}/models`;
+}
+
+export async function listGeminiModels(signal) {
+  if (!CONFIG.GEMINI_API_KEY) throw new Error('Gemini API key is not configured');
+  const url = `${resolveGeminiModelsUrl()}?key=${encodeURIComponent(CONFIG.GEMINI_API_KEY)}`;
+  const res = await fetch(url, { signal: signal ?? AbortSignal.timeout(15000) });
+  if (!res.ok) throw new Error(`gemini models ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const payload = await res.json();
+  const models = Array.isArray(payload) ? payload : payload.models;
+  if (!Array.isArray(models)) throw new Error('Gemini models response is invalid');
+  return models
+    .filter(model => !model?.supportedGenerationMethods || model.supportedGenerationMethods.includes('generateContent'))
+    .map(model => typeof model === 'string' ? model : model?.name)
+    .filter(Boolean)
+    .map(model => String(model).replace(/^models\//, ''));
+}
+
+async function probeAnthropicModel(model, signal) {
+  const res = await fetch(resolveAnthropicUrl(), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': CONFIG.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({ model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 8 }),
+    signal,
+  });
+  if (!res.ok) return false;
+  const data = await res.json().catch(() => ({}));
+  return Array.isArray(data?.content) && data.content.some(item => item?.type === 'text');
+}
+
+async function probeGeminiModel(model, signal) {
+  const url = `${resolveGeminiBase()}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(CONFIG.GEMINI_API_KEY)}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'ping' }] }], generationConfig: { maxOutputTokens: 8 } }),
+    signal,
+  });
+  if (!res.ok) return false;
+  const data = await res.json().catch(() => ({}));
+  return Boolean(data?.candidates?.[0]?.content?.parts?.length);
+}
+
+async function resolveProviderModel(provider, signal) {
+  const anthropic = provider === 'anthropic';
+  const configured = String((anthropic ? CONFIG.ANTHROPIC_MODEL : CONFIG.GEMINI_MODEL) || '').trim();
+  if (configured && configured.toUpperCase() !== 'AUTO') return configured;
+  const state = providerAutoState[provider];
+  const key = anthropic
+    ? `${resolveAnthropicUrl()}|${CONFIG.ANTHROPIC_API_KEY || 'missing'}`
+    : `${resolveGeminiBase()}|${CONFIG.GEMINI_API_KEY || 'missing'}`;
+  if (state.key === key && state.model && (!CONFIG.AI_AUTO_REFRESH || Date.now() < state.expiresAt)) return state.model;
+  const models = rankDiscoveredModels(anthropic ? await listAnthropicModels(signal) : await listGeminiModels(signal));
+  const probe = anthropic ? probeAnthropicModel : probeGeminiModel;
+  for (const candidate of models.slice(0, 10)) {
+    try {
+      if (await probe(candidate, signal)) {
+        state.key = key;
+        state.model = candidate;
+        state.expiresAt = Date.now() + Math.max(1000, Number(CONFIG.AI_MODEL_TTL) || 600000);
+        return candidate;
+      }
+    } catch {}
+  }
+  throw new Error(`No discovered ${provider} model passed the availability probe; set the provider model explicitly`);
 }
 
 function toolDefinitions(tools) {
@@ -219,8 +339,8 @@ async function chatOpenAI(messages, key, tools, options) {
 }
 
 async function chatAnthropic(messages, key, tools, options) {
-  const url = CONFIG.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1/messages';
-  const model = CONFIG.ANTHROPIC_MODEL && CONFIG.ANTHROPIC_MODEL !== 'AUTO' ? CONFIG.ANTHROPIC_MODEL : 'claude-3-haiku-20240307';
+  const url = resolveAnthropicUrl();
+  const model = await resolveProviderModel('anthropic', options.signal);
   const { system, history } = splitSystem(messages);
   const body = { model, messages: anthropicMessages(history), max_tokens: 2048, temperature: 0.7 };
   if (system) body.system = system;
@@ -241,13 +361,13 @@ async function chatAnthropic(messages, key, tools, options) {
 }
 
 async function chatGemini(messages, key, tools, options) {
-  const base = (CONFIG.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com').replace(/\/$/, '');
-  const model = CONFIG.GEMINI_MODEL && CONFIG.GEMINI_MODEL !== 'AUTO' ? CONFIG.GEMINI_MODEL : 'gemini-1.5-flash';
+  const base = resolveGeminiBase();
+  const model = await resolveProviderModel('google', options.signal);
   const { system, history } = splitSystem(messages);
   const body = { contents: geminiMessages(history) };
   if (system) body.systemInstruction = { parts: [{ text: system }] };
   if (tools?.length) body.tools = toGeminiToolDefs(tools);
-  const res = await fetch(`${base}/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`, {
+  const res = await fetch(`${base}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

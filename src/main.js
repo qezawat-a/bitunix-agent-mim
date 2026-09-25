@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import http from 'http';
+import fs from 'fs/promises';
 import { CONFIG, validate, readSettingsFile, applySettingsFile } from './config.js';
 import { BitunixClient } from './bitunix/client.js';
 import { BitunixWs } from './bitunix/ws.js';
@@ -8,7 +9,7 @@ import { Trader } from './trader/trader.js';
 import { setTraderInstances, setPositionManager } from './trader/agent-tools.js';
 import { setBitunixClient } from './bitunix/futures-tools.js';
 import { createTraderCommands } from './telegram-trader.js';
-import { sendMessage, isOwner, setCommands, esc } from './telegram-bot.js';
+import { sendMessage, isOwner, setCommands, setMenuButton, esc } from './telegram-bot.js';
 import { createAgent } from './agent/loop.js';
 import { buildSystemPrompt } from './prompt.js';
 import { basicTools, setBasicMemory } from './agent/basic-tools.js';
@@ -33,6 +34,11 @@ async function main() {
   if (missing.length) console.warn('[warn] missing env:', missing.join(', '));
   const configErrors = validateSettings(getTraderSettings(CONFIG));
   if (configErrors.length) throw new Error(`invalid configuration: ${configErrors.join('; ')}`);
+  if (!CONFIG.dry_run && (!CONFIG.BITUNIX_API_KEY || !CONFIG.BITUNIX_API_SECRET)) {
+    CONFIG.dry_run = true;
+    CONFIG.auto_trade = false;
+    console.warn('[safety] live mode requires both BITUNIX_API_KEY and BITUNIX_API_SECRET; forced dry-run');
+  }
 
   const stored = await loadStore();
   if (stored.settings) {
@@ -53,12 +59,17 @@ async function main() {
 
   const memory = new Memory();
   await memory.load();
-  const skills = await listSkills();
   const mcpServers = Array.isArray(fileSettings.mcp?.servers) ? fileSettings.mcp.servers : [];
-  const mcpTools = await loadMcpTools(mcpServers);
+  let mcpTools = await loadMcpTools(mcpServers);
   setBasicMemory(memory);
-  const tools = [...basicTools, ...traderTools, ...bitunixTools, ...mcpTools];
-  const getSystem = () => buildSystemPrompt({ skills, tools, memory: memory.all() });
+  let tools = [...basicTools, ...traderTools, ...bitunixTools, ...mcpTools];
+  async function reloadMcpTools() {
+    disposeMcpTools();
+    mcpTools = await loadMcpTools(mcpServers);
+    tools.splice(0, tools.length, ...basicTools, ...traderTools, ...bitunixTools, ...mcpTools);
+    return mcpTools;
+  }
+  const getSystem = async () => buildSystemPrompt({ skills: await listSkills(), tools, memory: memory.all() });
   const agent = createAgent({ system: getSystem, tools, memory, maxRounds: CONFIG.AGENT_MAX_STEP, history: [], autoCompact: true, thinkingLevel: CONFIG.AGENT_THINKING_LEVEL });
 
   const { handleCommand, scanState, reportState } = createTraderCommands({
@@ -68,9 +79,12 @@ async function main() {
     agent,
     loadSession,
     saveSession,
+    mcpServers,
+    getMcpTools: () => mcpTools,
+    reloadMcpTools,
   });
 
-  if (!CONFIG.dry_run && CONFIG.BITUNIX_API_KEY) {
+  if (!CONFIG.dry_run && CONFIG.BITUNIX_API_KEY && CONFIG.BITUNIX_API_SECRET) {
     try {
       await trader.syncAccountSettings({ apply: CONFIG.auto_trade });
     } catch (error) {
@@ -85,11 +99,12 @@ async function main() {
     onPrivate: event => { trader.handlePrivateEvent(event).catch(error => console.error('private state refresh error:', error.message)); },
   });
   try { ws.connectPublic(['tickers']); } catch {}
-  if (CONFIG.BITUNIX_API_KEY) {
-    try { ws.connectPrivate(['balance', 'order', 'position', 'tp_sl']); } catch {}
+  if (CONFIG.BITUNIX_API_KEY && CONFIG.BITUNIX_API_SECRET) {
+    try { ws.connectPrivate(['balance', 'order', 'position', 'tpsl']); } catch {}
   }
 
   await setCommands().catch(() => {});
+  await setMenuButton().catch(error => console.warn('[warn] Telegram mini-app menu:', error.message));
 
   let offset = 0;
   let pollTimer = null;
@@ -99,15 +114,19 @@ async function main() {
   async function poll() {
     if (!CONFIG.TELEGRAM_BOT_TOKEN) return;
     try {
-      const url = `https://api.telegram.org/bot${CONFIG.TELEGRAM_BOT_TOKEN}/getUpdates?timeout=30&offset=${offset}`;
+      const allowedUpdates = encodeURIComponent(JSON.stringify(['message', 'web_app_data']));
+      const url = `https://api.telegram.org/bot${CONFIG.TELEGRAM_BOT_TOKEN}/getUpdates?timeout=30&offset=${offset}&allowed_updates=${allowedUpdates}`;
       const res = await fetch(url, { signal: AbortSignal.timeout(35000) });
       if (!res.ok) throw new Error(`Telegram poll ${res.status}`);
       const data = await res.json();
       for (const upd of data.result || []) {
-        const msg = upd.message;
+        const webData = upd.web_app_data;
+        const msg = webData
+          ? { from: webData.from, chat: { id: CONFIG.ALLOWED_USER_ID } }
+          : upd.message;
         try {
-          if (msg?.text) {
-            const text = msg.text.trim();
+          const text = String(webData?.data || msg?.text || '').trim();
+          if (text) {
             if (isOwner(msg)) {
               if (text.startsWith('/')) {
                 const handled = await handleCommand(msg, text);
@@ -159,7 +178,20 @@ async function main() {
   else console.warn('[warn] TELEGRAM_BOT_TOKEN missing — telegram disabled');
   runScanCycle();
 
-  const server = http.createServer((req, res) => {
+  const miniAppFile = new URL('../mini-app/index.html', import.meta.url);
+  const server = http.createServer(async (req, res) => {
+    const requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    if (requestUrl.pathname === '/app' || requestUrl.pathname === '/app/') {
+      try {
+        const html = await fs.readFile(miniAppFile);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(html);
+      } catch {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Mini app not found');
+      }
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, name: CONFIG.AGENT_NAME, dry_run: CONFIG.dry_run, auto_trade: CONFIG.auto_trade }));
   });

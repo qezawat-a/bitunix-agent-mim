@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>J-ROCK</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root{color-scheme:dark;--bg:#10131a;--panel:#1a2130;--text:#f4f6fb;--muted:#aeb7c8;--accent:#2563eb}
+    *{box-sizing:border-box}body{font-family:Arial,sans-serif;background:var(--bg);color:var(--text);margin:0;padding:20px;padding-bottom:max(20px,env(safe-area-inset-bottom))}
+    h1{margin:0 0 6px}p{color:var(--muted)}
+    .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:20px}
+    button{background:var(--accent);color:white;border:0;border-radius:10px;padding:14px 10px;font-weight:700}
+    button:active{transform:scale(.98)}.wide{grid-column:1/-1}
+    .ask{display:flex;gap:8px;margin-top:20px}.ask input{flex:1;min-width:0;background:var(--panel);border:1px solid #303b50;border-radius:10px;color:var(--text);padding:12px}
+    #status{min-height:20px;color:var(--muted);font-size:13px;margin-top:12px}
+  </style>
+</head>
+<body>
+  <h1>J-ROCK</h1>
+  <p>Telegram control panel</p>
+  <div class="grid">
+    <button data-command="/status">Status</button>
+    <button data-command="/balance">Balance</button>
+    <button data-command="/positions">Positions</button>
+    <button data-command="/pnl">PnL</button>
+    <button data-command="/signal">Signal</button>
+    <button data-command="/models">Models</button>
+    <button data-command="/setmodels AUTO">Auto Model</button>
+    <button data-command="/skills">Skills</button>
+    <button data-command="/soul">Soul</button>
+    <button data-command="/mcp">MCP</button>
+    <button data-command="/harness">Harness</button>
+    <button data-command="/settings">Settings</button>
+    <button class="wide" data-command="/diag">Diagnostics</button>
+    <div class="ask wide">
+      <input id="message" autocomplete="off" placeholder="Ask the agent…">
+      <button id="send">Send</button>
+    </div>
+    <div id="status" class="wide"></div>
+  </div>
+  <script>
+    const app=window.Telegram?.WebApp;
+    const status=document.getElementById('status');
+    if(app){app.ready();app.expand?.();}
+    function send(command){
+      if(!app){status.textContent='Open this page from the Telegram bot menu.';return;}
+      if(command.length>3500){status.textContent='Message is too long.';return;}
+      app.sendData(command);app.HapticFeedback?.impactOccurred('light');status.textContent='Sent to J-ROCK';
+    }
+    document.querySelectorAll('[data-command]').forEach(button=>button.addEventListener('click',()=>send(button.dataset.command)));
+    document.getElementById('send').addEventListener('click',()=>{
+      const input=document.getElementById('message');
+      const text=input.value.trim();
+      if(text){send(`/ask ${text}`);input.value='';}
+    });
+    document.getElementById('message').addEventListener('keydown',event=>{if(event.key==='Enter')document.getElementById('send').click();});
+  </script>
+</body>
+</html>

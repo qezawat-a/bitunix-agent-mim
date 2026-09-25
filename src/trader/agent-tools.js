@@ -1,4 +1,5 @@
 import { CONFIG } from '../config.js';
+import { strictListFromData } from '../bitunix/client.js';
 import { applySettings, getTraderSettings } from './settings.js';
 
 let sharedTrader = null;
@@ -48,7 +49,8 @@ export const traderTools = [
       if (key === 'symbol' && String(value).toUpperCase() !== CONFIG.symbol) {
         const client = requireClient();
         const positions = await client.getPendingPositions(CONFIG.symbol);
-        if (!Array.isArray(positions) || positions.length) throw new Error('cannot change symbol while positions are open');
+        const positionList = strictListFromData(positions);
+        if (!positionList || positionList.length) throw new Error('cannot change symbol while positions are open');
       }
       const settings = applySettings(CONFIG, { [key]: value });
       return { ok: true, key, value: settings[key] };

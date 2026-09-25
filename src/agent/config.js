@@ -1,4 +1,5 @@
 import { CONFIG } from '../config.js';
+import { listAnthropicModels, listGeminiModels, listOpenAiModels } from './brain.js';
 
 export function detectProviders() {
   const provider = String(CONFIG.AI_PROVIDER || 'auto').trim().toLowerCase();
@@ -11,22 +12,15 @@ export function detectProviders() {
 }
 
 export async function listProviderModels(provider) {
-  // basic model list lookup
-  const lists = {
-    openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4', 'gpt-3.5-turbo'],
-    anthropic: ['claude-3-5-sonnet-20240620', 'claude-3-haiku-20240307'],
-    google: ['gemini-1.5-pro', 'gemini-1.5-flash'],
-  };
-  return lists[provider] || [];
+  if (provider === 'openai') return listOpenAiModels();
+  if (provider === 'anthropic') return listAnthropicModels();
+  if (provider === 'google') return listGeminiModels();
+  throw new Error(`unsupported model provider: ${provider}`);
 }
 
 export async function rankModels(provider, freePrefer = true) {
   const models = await listProviderModels(provider);
   if (!freePrefer) return [...models];
-  const order = {
-    openai: ['gpt-4o-mini', 'gpt-4o', 'gpt-4', 'gpt-3.5-turbo'],
-    anthropic: ['claude-3-haiku-20240307', 'claude-3-5-sonnet-20240620'],
-    google: ['gemini-1.5-flash', 'gemini-1.5-pro'],
-  };
-  return (order[provider] || []).filter(model => models.includes(model));
+  const preferred = /flash|mini|lite|nano|small|distil|haiku|sonnet|free/i;
+  return [...models].sort((a, b) => Number(preferred.test(b)) - Number(preferred.test(a)));
 }

@@ -1,4 +1,8 @@
 import { CONFIG } from '../config.js';
+import { detectProviders } from './config.js';
+import { listAnthropicModels, listGeminiModels, listOpenAiModels } from './brain.js';
+import { listSkills } from './skills.js';
+import { readSoul } from '../prompt.js';
 
 let sharedMemory = null;
 
@@ -13,7 +17,7 @@ export const basicTools = [
     parameters: { type: 'object', properties: {} },
     async handler() {
       return {
-        commands: ['/help', '/think [level]', '/models', '/ask <text>', '/soul', '/skills', '/memory [key]', '/resume', '/start', '/stop', '/settings', '/dryrun', '/autotrade', '/scan', '/trades', '/balance', '/pnl', '/close', '/diag'],
+        commands: ['/help', '/think [level]', '/models', '/setModels [model|AUTO]', '/ask <text>', '/harness <jsonl>', '/soul', '/skills', '/memory [key]', '/resume', '/start', '/stop', '/settings', '/dryrun', '/autotrade', '/scan', '/trades', '/balance', '/pnl', '/close', '/diag'],
         tools: ['trader_xxxx', 'bitunix_xxxx', 'agent_xxxx'],
       };
     },
@@ -63,9 +67,7 @@ export const basicTools = [
     parameters: { type: 'object', properties: {} },
     async handler() {
       try {
-        const fs = await import('fs/promises');
-        const soul = await fs.readFile('soul/SOUL.md', 'utf8');
-        return { soul };
+        return { soul: await readSoul() };
       } catch { return { soul: 'SOUL.md not found' }; }
     },
   },
@@ -74,12 +76,8 @@ export const basicTools = [
     description: 'List skills',
     parameters: { type: 'object', properties: {} },
     async handler() {
-      try {
-        const fs = await import('fs/promises');
-        const entries = await fs.readdir('skills');
-        const skills = entries.filter(e => e.endsWith('.md'));
-        return { skills };
-      } catch { return { skills: [] }; }
+      const skills = await listSkills();
+      return { skills: skills.map(skill => ({ id: skill.id, description: skill.description, custom: skill.custom })) };
     },
   },
   {
@@ -103,16 +101,20 @@ export const basicTools = [
   },
   {
     name: 'agent_models',
-    description: 'List available models',
+    description: 'List models discovered from the configured provider',
     parameters: { type: 'object', properties: {} },
     async handler() {
-      return {
-        models: {
-          openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4'],
-          anthropic: ['claude-3-5-sonnet', 'claude-3-haiku'],
-          google: ['gemini-1.5-pro', 'gemini-1.5-flash'],
-        },
-      };
+      const provider = detectProviders();
+      try {
+        const models = provider === 'openai'
+          ? await listOpenAiModels()
+          : provider === 'anthropic'
+            ? await listAnthropicModels()
+            : await listGeminiModels();
+        return { provider, models, configured: provider === 'openai' ? CONFIG.AI_MODEL : provider === 'anthropic' ? CONFIG.ANTHROPIC_MODEL : CONFIG.GEMINI_MODEL };
+      } catch (error) {
+        return { provider, models: [], error: error.message };
+      }
     },
   },
 ];

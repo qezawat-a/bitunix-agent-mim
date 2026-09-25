@@ -12,7 +12,7 @@ import {
 } from '../src/trader/settings.js';
 import { parseThinkingLevel } from '../src/agent/thinking.js';
 import { CONFIG, parseBoolean, applySettingsFile } from '../src/config.js';
-import { BitunixClient } from '../src/bitunix/client.js';
+import { BitunixClient, canonicalQuery } from '../src/bitunix/client.js';
 import Scanner from '../src/bitunix/scanner.js';
 import { liqDistanceOk } from '../src/bitunix/risk.js';
 import { Trader } from '../src/trader/trader.js';
@@ -24,7 +24,8 @@ import { chat, listOpenAiModels, resolveOpenAiModelsUrl, resolveOpenAiUrl } from
 import { createAgent } from '../src/agent/loop.js';
 import { stringifyToolResult, validateToolArguments } from '../src/agent/tools.js';
 import { splitHtml } from '../src/telegram-bot.js';
-import { BitunixWs } from '../src/bitunix/ws.js';
+import { BitunixWs, normalizeChannel, wsLoginSignature } from '../src/bitunix/ws.js';
+import { createTraderCommands } from '../src/telegram-trader.js';
 
 const originalConfig = { ...CONFIG, timeframes: [...CONFIG.timeframes] };
 const originalFetch = globalThis.fetch;
@@ -171,6 +172,11 @@ describe('indicator correctness', () => {
 });
 
 describe('exchange safety', () => {
+  it('matches the official Bitunix query signature format', () => {
+    assert.equal(canonicalQuery({ uid: 200, id: 1 }), 'id1uid200');
+    assert.equal(canonicalQuery({ symbol: 'BTCUSDT', limit: 200, interval: '15m' }), 'interval15mlimit200symbolBTCUSDT');
+  });
+
   it('rejects Bitunix API error envelopes', async () => {
     const client = new BitunixClient();
     globalThis.fetch = async () => ({ ok: true, json: async () => ({ code: '1001', msg: 'rejected', data: null }) });
@@ -201,6 +207,70 @@ describe('exchange safety', () => {
     const client = new BitunixClient();
     globalThis.fetch = async () => ({ ok: true, json: async () => ({ code: 0, data: [{ marginCoin: 'USDC', available: '10' }] }) });
     await assert.rejects(() => client.getAccount('USDT'), /USDT not found/);
+  });
+
+  it('matches documented market, pagination, and write endpoint contracts', async () => {
+    const requests = [];
+    globalThis.fetch = async (url, options) => {
+      requests.push({ url, options });
+      return { ok: true, json: async () => ({ code: 0, data: { orderList: [], positionList: [] } }) };
+    };
+    const client = new BitunixClient();
+    await client.getTickers('BTCUSDT');
+    await client.getFundingRateBatch();
+    await client.getTradingPairs(['BTCUSDT', 'ETHUSDT']);
+    await client.getTradingSettings(['BTCUSDT']);
+    await client.getHistoryOrders({ symbol: 'BTCUSDT', limit: 10 });
+    await client.getPendingOrders({ symbol: 'BTCUSDT', limit: 10 });
+    await client.getOrderDetail({ clientId: 'client-1' });
+    await client.getHistoryPositions({ symbol: 'BTCUSDT', skip: 0, limit: 10 });
+    await client.getPositionTiers('BTCUSDT');
+    await client.cancelOrders('BTCUSDT', [{ orderId: 'o1' }]);
+    await client.flashClosePosition('p1');
+    await client.adjustPositionMargin('BTCUSDT', '-2', { side: 'LONG' });
+    await client.batchOrder('BTCUSDT', [{ side: 'BUY', qty: '1', orderType: 'MARKET' }]);
+    await client.placeTPSLOrder({ symbol: 'BTCUSDT', positionId: 'p1', slPrice: '90' });
+    await client.transferAssetFromMainAccountToSubAccount({ amount: '10', assetType: 'SPOT' });
+    await client.transferAssetFromSubAccountToMainAccount({ amount: '10', assetType: 'FUTURES' });
+    const parsed = requests.map(item => ({ path: new URL(item.url).pathname, query: new URL(item.url).searchParams, body: item.options.body ? JSON.parse(item.options.body) : null }));
+    assert.equal(parsed[0].path, '/api/v1/futures/market/tickers');
+    assert.equal(parsed[0].query.get('symbols'), 'BTCUSDT');
+    assert.equal(parsed[1].path, '/api/v1/futures/market/funding_rate/batch');
+    assert.equal(parsed[2].query.get('symbols'), 'BTCUSDT,ETHUSDT');
+    assert.equal(parsed[3].query.get('symbols'), 'BTCUSDT');
+    assert.equal(parsed[4].query.get('limit'), '10');
+    assert.equal(parsed[5].query.get('limit'), '10');
+    assert.equal(parsed[6].query.get('clientId'), 'client-1');
+    assert.equal(parsed[7].path, '/api/v1/futures/position/get_history_positions');
+    assert.equal(parsed[7].query.get('skip'), '0');
+    assert.equal(parsed[8].path, '/api/v1/futures/position/get_position_tiers');
+    assert.equal(parsed[9].path, '/api/v1/futures/trade/cancel_orders');
+    assert.deepEqual(parsed[9].body, { symbol: 'BTCUSDT', orderList: [{ orderId: 'o1' }] });
+    assert.deepEqual(parsed[10].body, { positionId: 'p1' });
+    assert.deepEqual(parsed[11].body, { symbol: 'BTCUSDT', amount: '-2', marginCoin: 'USDT', side: 'LONG' });
+    assert.equal(parsed[12].body.orderList[0].tradeSide, 'OPEN');
+    assert.equal(Object.hasOwn(parsed[12].body.orderList[0], 'symbol'), false);
+    assert.equal(parsed[13].path, '/api/v1/futures/tpsl/place_order');
+    assert.equal(parsed[14].path, '/api/v1/cp/asset/transfer-to-sub-account');
+    assert.deepEqual(parsed[14].body, { amount: '10', assetType: 'SPOT' });
+    assert.equal(parsed[15].path, '/api/v1/cp/asset/transfer-to-main-account');
+  });
+
+  it('signs the exact compact query/body representation', async () => {
+    let request;
+    globalThis.fetch = async (url, options) => {
+      request = { url, options };
+      return { ok: true, json: async () => ({ code: 0, data: {} }) };
+    };
+    const client = new BitunixClient();
+    client.apiKey = 'test-key';
+    client.secretKey = 'test-secret';
+    await client.request('GET', '/signed', { ignored: true }, { z: 2, a: 1 });
+    const headers = request.options.headers;
+    const expected = BitunixClient.sha256(BitunixClient.sha256(`${headers.nonce}${headers.timestamp}test-keya1z2`) + 'test-secret');
+    assert.equal(headers.sign, expected);
+    assert.match(headers.timestamp, /^\d{13}$/);
+    assert.equal(headers['api-key'], 'test-key');
   });
 
   it('fails closed when liquidation data is missing', () => {
@@ -447,7 +517,7 @@ describe('provider and websocket safety', () => {
       bodies.push(JSON.parse(options.body));
       return { ok: true, json: async () => ({ content: [{ type: 'text', text: 'ok' }] }) };
     };
-    Object.assign(CONFIG, { ANTHROPIC_API_KEY: 'anthropic-key', GEMINI_API_KEY: 'gemini-key' });
+    Object.assign(CONFIG, { ANTHROPIC_API_KEY: 'anthropic-key', GEMINI_API_KEY: 'gemini-key', ANTHROPIC_MODEL: 'test-anthropic', GEMINI_MODEL: 'test-gemini' });
     const tools = [{ name: 'probe', description: 'probe', parameters: { type: 'object', properties: {} } }];
     await chat([{ role: 'system', content: 'rules' }, { role: 'user', content: 'hello' }], 'anthropic', tools);
     await chat([{ role: 'system', content: 'rules' }, { role: 'user', content: 'hello' }], 'google', tools);
@@ -460,7 +530,7 @@ describe('provider and websocket safety', () => {
   it('executes Anthropic tool calls through the shared loop', async () => {
     let calls = 0;
     let round = 0;
-    Object.assign(CONFIG, { AI_PROVIDER: 'anthropic', AI_API_KEY: '', ANTHROPIC_API_KEY: 'anthropic-key', GEMINI_API_KEY: '' });
+    Object.assign(CONFIG, { AI_PROVIDER: 'anthropic', AI_API_KEY: '', ANTHROPIC_API_KEY: 'anthropic-key', GEMINI_API_KEY: '', ANTHROPIC_MODEL: 'test-anthropic' });
     globalThis.fetch = async () => {
       round += 1;
       return { ok: true, json: async () => round === 1 ? { content: [{ type: 'tool_use', id: 'call-1', name: 'probe', input: { value: 1 } }] } : { content: [{ type: 'text', text: 'done' }] } };
@@ -488,6 +558,68 @@ describe('provider and websocket safety', () => {
     ws.close();
     socket.handlers.close?.();
     assert.equal(sockets.length, 1);
+  });
+
+  it('uses official public and private WebSocket frames', () => {
+    const sockets = [];
+    class FakeSocket {
+      constructor(url) { this.url = url; this.handlers = {}; this.sent = []; sockets.push(this); }
+      on(event, handler) { this.handlers[event] = handler; }
+      send(value) { this.sent.push(JSON.parse(value)); }
+      close() { this.handlers.close?.(); }
+    }
+    const previous = { key: CONFIG.BITUNIX_API_KEY, secret: CONFIG.BITUNIX_API_SECRET, symbol: CONFIG.symbol };
+    CONFIG.BITUNIX_API_KEY = 'ws-key';
+    CONFIG.BITUNIX_API_SECRET = 'ws-secret';
+    CONFIG.symbol = 'BTCUSDT';
+    const ws = new BitunixWs({}, FakeSocket);
+    const publicSocket = ws.connectPublic([{ ch: 'kline', symbol: 'ETHUSDT', interval: '1m' }, 'ticker']);
+    publicSocket.handlers.open();
+    assert.deepEqual(publicSocket.sent[0], { op: 'subscribe', args: [{ ch: 'kline', symbol: 'ETHUSDT', interval: '1m' }, { ch: 'ticker', symbol: 'BTCUSDT' }] });
+    const privateSocket = ws.connectPrivate(['balance', 'tpsl']);
+    privateSocket.handlers.open();
+    assert.equal(privateSocket.sent[0].op, 'login');
+    const auth = privateSocket.sent[0].args[0];
+    assert.equal(typeof auth.timestamp, 'number');
+    assert.ok(Math.abs(Date.now() / 1000 - auth.timestamp) < 2);
+    assert.equal(auth.sign, wsLoginSignature(auth.nonce, auth.timestamp, 'ws-key', 'ws-secret'));
+    assert.deepEqual(privateSocket.sent[1], { op: 'subscribe', args: [{ ch: 'balance' }, { ch: 'tpsl' }] });
+    assert.deepEqual(normalizeChannel('trade', true), { ch: 'trade', symbol: 'BTCUSDT' });
+    ws.close();
+    Object.assign(CONFIG, previous);
+  });
+});
+
+describe('telegram command routing', () => {
+  it('accepts case/alias commands and parses harness JSONL', async () => {
+    const telegramRequests = [];
+    globalThis.fetch = async (url, options) => {
+      telegramRequests.push({ url, body: options.body ? JSON.parse(options.body) : null });
+      if (url.endsWith('/models')) return { ok: true, json: async () => ({ data: [{ id: 'model-a' }] }) };
+      return { ok: true, json: async () => ({ ok: true }), text: async () => '' };
+    };
+    Object.assign(CONFIG, {
+      ALLOWED_USER_ID: '42',
+      TELEGRAM_BOT_TOKEN: 'test-token',
+      AI_PROVIDER: 'openai',
+      AI_API_KEY: 'test-key',
+      AI_BASE_URL: 'https://provider.test/v1',
+      AI_MODEL: 'AUTO',
+    });
+    const messages = [];
+    const agent = {
+      memory: { all: () => ({}), remember: async () => {} },
+      say: async message => { messages.push(message); return { content: `echo:${message}` }; },
+    };
+    const { handleCommand } = createTraderCommands({ client: {}, scanner: {}, trader: {}, agent });
+    const message = { chat: { id: 42 }, from: { id: 42 } };
+    assert.equal(await handleCommand(message, '/setModels AUTO'), true);
+    assert.equal(CONFIG.AI_MODEL, 'AUTO');
+    assert.equal(await handleCommand(message, '/harness {"id":7,"message":"hello"}'), true);
+    assert.deepEqual(messages, ['hello']);
+    assert.equal(await handleCommand(message, '/skils'), true);
+    assert.equal(await handleCommand(message, '/sould'), true);
+    assert.ok(telegramRequests.some(item => item.url.endsWith('/sendMessage') && String(item.body.text).includes('echo:hello')));
   });
 });
 

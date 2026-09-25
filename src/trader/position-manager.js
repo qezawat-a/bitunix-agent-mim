@@ -1,3 +1,5 @@
+import { strictListFromData } from '../bitunix/client.js';
+
 function finitePositive(value) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0;
@@ -41,9 +43,10 @@ export class PositionManager {
     const symbol = this.symbol;
     this.fetchInFlight = (async () => {
       const data = await this.client.getPendingPositions(symbol);
-      if (!Array.isArray(data)) throw new Error('Bitunix positions response must be an array');
+      const positions = strictListFromData(data, ['positionList']);
+      if (!positions) throw new Error('Bitunix positions response must contain an array');
       if (symbol !== this.symbol) throw new Error('symbol changed while positions were being fetched');
-      const normalized = data
+      const normalized = positions
         .filter(position => String(position.symbol || '').toUpperCase() === String(symbol).toUpperCase())
         .map(position => ({
           ...position,
@@ -202,8 +205,9 @@ export class PositionManager {
     if (!direction) throw new Error(`position ${key} has an invalid side for TP/SL`);
     try {
       if (!this.settings.dry_run) {
-        const pending = await this.client.getPendingTPSL(this.symbol);
-        if (!Array.isArray(pending)) throw new Error('pending TP/SL response must be an array');
+        const pendingData = await this.client.getPendingTPSL(this.symbol);
+        const pending = strictListFromData(pendingData, ['orderList']);
+        if (!pending) throw new Error('pending TP/SL response must contain an array');
         const existing = pending.find(item => String(item.positionId) === key && finitePositive(item.slPrice ?? item.stopPrice));
         if (existing) return { verified: true, result: existing };
       }

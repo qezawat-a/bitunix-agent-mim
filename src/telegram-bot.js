@@ -112,6 +112,11 @@ export async function setCommands() {
     { command: 'leverage', description: 'Set leverage' },
     { command: 'symbol', description: 'Set symbol' },
     { command: 'models', description: 'LLM models' },
+    { command: 'setmodels', description: 'Auto-select or set model' },
+    { command: 'harness', description: 'JSONL harness test' },
+    { command: 'skills', description: 'Manage agent skills' },
+    { command: 'soul', description: 'Read or edit soul prompt' },
+    { command: 'mcp', description: 'MCP servers and tools' },
     { command: 'thinking', description: 'thinking off|low|mid|high|max' },
     { command: 'memory', description: 'Memory show' },
     { command: 'resume', description: 'Resume session' },
@@ -119,6 +124,21 @@ export async function setCommands() {
     { command: 'diag', description: 'Diagnostics' },
   ];
   await postTelegram(`https://api.telegram.org/bot${token}/setMyCommands`, { commands });
+  return true;
+}
+
+export async function setMenuButton(url = CONFIG.MINI_APP_URL) {
+  const token = CONFIG.TELEGRAM_BOT_TOKEN;
+  if (!token || !url) return false;
+  let parsed;
+  try { parsed = new URL(url); } catch { throw new Error('MINI_APP_URL must be a public HTTPS URL'); }
+  if (parsed.protocol !== 'https:' || !parsed.hostname) throw new Error('MINI_APP_URL must be a public HTTPS URL');
+  if (parsed.hostname === 'localhost' || parsed.hostname.endsWith('.local') || ['[::1]', '::1', '0.0.0.0'].includes(parsed.hostname) || /^(?:127\.|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[0-1])\.)/.test(parsed.hostname)) {
+    throw new Error('MINI_APP_URL must be a public HTTPS URL');
+  }
+  await postTelegram(`https://api.telegram.org/bot${token}/setChatMenuButton`, {
+    menu_button: { type: 'web_app', text: 'Open J-ROCK', web_app: { url } },
+  });
   return true;
 }
 

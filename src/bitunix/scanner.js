@@ -21,7 +21,8 @@ class Scanner {
   async getFunding(symbol) {
     try {
       const data = await this.client.getFundingRate(symbol);
-      const value = Number(data?.value);
+      const record = Array.isArray(data) ? data[0] : data;
+      const value = Number(record?.fundingRate ?? record?.value);
       return Number.isFinite(value) ? value : 0;
     } catch {
       return 0;

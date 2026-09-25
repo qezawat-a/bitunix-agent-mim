@@ -1,38 +1,34 @@
 import { CONFIG } from '../config.js';
+import { listAnthropicModels, listGeminiModels, listOpenAiModels } from './brain.js';
 
 const cache = new Map();
 let lastRefresh = 0;
 
 export async function listProviderModels(provider) {
-  const lists = {
-    openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4', 'gpt-3.5-turbo'],
-    anthropic: ['claude-3-5-sonnet-20240620', 'claude-3-haiku-20240307'],
-    google: ['gemini-1.5-pro', 'gemini-1.5-flash'],
-  };
   if (cache.has(provider)) return cache.get(provider);
-  const models = lists[provider] || [];
+  const models = provider === 'openai'
+    ? await listOpenAiModels()
+    : provider === 'anthropic'
+      ? await listAnthropicModels()
+      : provider === 'google'
+        ? await listGeminiModels()
+        : [];
   cache.set(provider, models);
+  lastRefresh = Date.now();
   return models;
 }
 
 export async function rankModels(provider, freePrefer = true) {
   const models = await listProviderModels(provider);
   if (!freePrefer) return [...models];
-  const order = {
-    openai: ['gpt-4o-mini', 'gpt-4o', 'gpt-4', 'gpt-3.5-turbo'],
-    anthropic: ['claude-3-haiku-20240307', 'claude-3-5-sonnet-20240620'],
-    google: ['gemini-1.5-flash', 'gemini-1.5-pro'],
-  };
-  return (order[provider] || []).filter(model => models.includes(model));
+  const preferred = /flash|mini|lite|nano|small|distil|haiku|sonnet|free/i;
+  return [...models].sort((a, b) => Number(preferred.test(b)) - Number(preferred.test(a)));
 }
 
-export function fallbackCandidates(provider) {
-  const order = {
-    openai: ['gpt-4o-mini', 'gpt-4o', 'gpt-4'],
-    anthropic: ['claude-3-haiku-20240307', 'claude-3-5-sonnet-20240620'],
-    google: ['gemini-1.5-flash', 'gemini-1.5-pro'],
-  };
-  return order[provider] || [];
+// Kept for callers that used the old experimental helper. There are deliberately
+// no baked-in model names: AUTO must use the provider's live catalog.
+export function fallbackCandidates() {
+  return [];
 }
 
 export function isBalanceError(err) {

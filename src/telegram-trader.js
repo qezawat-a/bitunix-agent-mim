@@ -1,19 +1,38 @@
 import { CONFIG, parseBoolean } from './config.js';
+import { strictListFromData } from './bitunix/client.js';
 import { sendMessage, isOwner, esc, formatSignalReport } from './telegram-bot.js';
 import { applySettings, getTraderSettings, parseSettingValue, validateSettings } from './trader/settings.js';
 import { parseThinkingLevel } from './agent/thinking.js';
 import { detectProviders } from './agent/config.js';
-import { listOpenAiModels } from './agent/brain.js';
+import { listAnthropicModels, listGeminiModels, listOpenAiModels, resetOpenAiModelCache } from './agent/brain.js';
+import { listSkills, loadSkill, removeSkill, saveSkill } from './agent/skills.js';
+import { appendSoul, readSoul, writeSoul } from './prompt.js';
 
 function usage(chatId, text) {
   return sendMessage(chatId, text).then(() => true);
+}
+
+function parseHarnessInput(text) {
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return { id: parsed.id ?? null, message: String(parsed.message ?? parsed.text ?? '') };
+    }
+  } catch {}
+  return { id: null, message: text };
+}
+
+async function listProviderModels(provider) {
+  if (provider === 'openai') return listOpenAiModels();
+  if (provider === 'anthropic') return listAnthropicModels();
+  return listGeminiModels();
 }
 
 function markCooldown(trader) {
   if (trader?.state) trader.state.cooldownUntil = Date.now() + Number(CONFIG.cooldown_minutes) * 60000;
 }
 
-export function createTraderCommands({ client, scanner, trader, agent, loadSession = null, saveSession = null }) {
+export function createTraderCommands({ client, scanner, trader, agent, loadSession = null, saveSession = null, mcpServers = [], getMcpTools = () => [], reloadMcpTools = null }) {
   const scanState = { scanOn: true };
   const reportState = { reportOn: true };
 
@@ -24,7 +43,7 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
       return true;
     }
     const [cmdRaw, ...rest] = text.trim().split(/\s+/);
-    const cmd = cmdRaw.replace(/^\//, '').split('@')[0];
+    const cmd = cmdRaw.replace(/^\//, '').split('@')[0].toLowerCase();
     const arg = rest.join(' ');
 
     try {
@@ -40,7 +59,7 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           return true;
         }
         case 'help': {
-          await sendMessage(chatId, '<b>Commands</b>\n/start /stop /status /help /settings /set /get /signal /balance /positions /trades /pnl /close &lt;symbol&gt; &lt;positionId&gt; /close_all &lt;symbol&gt; confirm /dryrun /autotrade /scan /report /leverage /symbol /models /thinking /memory /resume /ask /diag');
+          await sendMessage(chatId, '<b>Commands</b>\n/start /stop /status /help /settings /set /get /signal /balance /positions /trades /pnl /close &lt;symbol&gt; &lt;positionId&gt; /close_all &lt;symbol&gt; confirm /dryrun /autotrade /scan /report /leverage /symbol /models /setmodels /harness /skills|/skils /soul|/sould /mcp /thinking /memory /resume /ask /diag');
           return true;
         }
         case 'status': {
@@ -56,10 +75,12 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
         case 'set': {
           const [key, ...parts] = rest;
           if (!key || !parts.length) return usage(chatId, 'Usage: /set key value');
+          if (key === 'dry_run' || key === 'auto_trade') return usage(chatId, 'Use /dryrun or /autotrade for safety switches.');
           const value = parseSettingValue(key, parts.join(' '));
           if (key === 'symbol' && String(value).toUpperCase() !== CONFIG.symbol) {
             const positions = await client.getPendingPositions(CONFIG.symbol);
-            if (!Array.isArray(positions) || positions.length) return usage(chatId, 'Cannot change symbol while positions are open.');
+            const positionList = strictListFromData(positions);
+            if (!positionList || positionList.length) return usage(chatId, 'Cannot change symbol while positions are open.');
           }
           applySettings(CONFIG, { [key]: value });
           await sendMessage(chatId, `Set <code>${esc(key)}</code> = <code>${esc(String(value))}</code>`);
@@ -125,12 +146,16 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           return true;
         }
         case 'dryrun': {
-          CONFIG.dry_run = parseBoolean(arg, !CONFIG.dry_run, 'dryrun');
+          const next = parseBoolean(arg, !CONFIG.dry_run, 'dryrun');
+          if (!next && (!CONFIG.BITUNIX_API_KEY || !CONFIG.BITUNIX_API_SECRET)) return usage(chatId, 'Both Bitunix API credentials are required for live mode.');
+          CONFIG.dry_run = next;
           await sendMessage(chatId, `DRY_RUN=<code>${CONFIG.dry_run ? 1 : 0}</code>`);
           return true;
         }
         case 'autotrade': {
-          CONFIG.auto_trade = parseBoolean(arg, !CONFIG.auto_trade, 'autotrade');
+          const next = parseBoolean(arg, !CONFIG.auto_trade, 'autotrade');
+          if (next && (!CONFIG.BITUNIX_API_KEY || !CONFIG.BITUNIX_API_SECRET)) return usage(chatId, 'Both Bitunix API credentials are required for auto-trade.');
+          CONFIG.auto_trade = next;
           if (CONFIG.auto_trade) scanState.scanOn = true;
           await sendMessage(chatId, `AUTO_TRADE=<code>${CONFIG.auto_trade ? 'on' : 'off'}</code>`);
           return true;
@@ -161,21 +186,117 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           const symbol = arg.toUpperCase();
           if (!/^[A-Z0-9]{5,32}$/.test(symbol)) return usage(chatId, 'Invalid symbol.');
           const positions = await client.getPendingPositions(CONFIG.symbol);
-          if (!Array.isArray(positions) || positions.length) return usage(chatId, 'Cannot change symbol while positions are open.');
+          const positionList = strictListFromData(positions);
+          if (!positionList || positionList.length) return usage(chatId, 'Cannot change symbol while positions are open.');
           applySettings(CONFIG, { symbol });
           await sendMessage(chatId, `symbol <code>${esc(CONFIG.symbol)}</code>`);
           return true;
         }
         case 'models': {
           const provider = detectProviders();
-          if (provider === 'openai') {
-            const models = await listOpenAiModels();
-            const configured = String(CONFIG.AI_MODEL || '').toUpperCase() === 'AUTO' || !CONFIG.AI_MODEL
-              ? 'auto-detect'
-              : models.includes(CONFIG.AI_MODEL) ? 'configured' : 'not found';
-            await sendMessage(chatId, `<b>OpenAI-compatible models</b>\nconfigured: <code>${esc(CONFIG.AI_MODEL)}</code> (${configured})\n${models.slice(0, 40).map(model => `<code>${esc(model)}</code>`).join('\n')}`);
+          const models = await listProviderModels(provider);
+          const configuredKey = provider === 'openai' ? 'AI_MODEL' : provider === 'anthropic' ? 'ANTHROPIC_MODEL' : 'GEMINI_MODEL';
+          const configured = String(CONFIG[configuredKey] || '').toUpperCase() === 'AUTO' || !CONFIG[configuredKey]
+            ? 'auto-detect'
+            : models.includes(CONFIG[configuredKey]) ? 'configured' : 'not found';
+          await sendMessage(chatId, `<b>${esc(provider)} models</b>\nconfigured: <code>${esc(CONFIG[configuredKey])}</code> (${configured})\n${models.slice(0, 40).map(model => `<code>${esc(model)}</code>`).join('\n')}`);
+          return true;
+        }
+        case 'setmodels': {
+          const provider = detectProviders();
+          const requested = rest.join(' ').trim();
+          const value = requested || 'AUTO';
+          if (value.toUpperCase() !== 'AUTO') {
+            const models = await listProviderModels(provider);
+            if (!models.includes(value)) {
+              return usage(chatId, `Model is not available. Use one of: ${models.slice(0, 20).join(', ')}`);
+            }
+          }
+          const key = provider === 'openai' ? 'AI_MODEL' : provider === 'anthropic' ? 'ANTHROPIC_MODEL' : 'GEMINI_MODEL';
+          CONFIG[key] = value.toUpperCase() === 'AUTO' ? 'AUTO' : value;
+          resetOpenAiModelCache();
+          await sendMessage(chatId, `${key} set to <code>${esc(CONFIG[key])}</code>.`);
+          return true;
+        }
+        case 'harness': {
+          if (!arg) {
+            await sendMessage(chatId, '<b>Harness</b>\nUsage: <code>/harness your JSONL message</code>\nExample: <code>/harness {"id":1,"message":"status"}</code>');
+            return true;
+          }
+          const input = parseHarnessInput(arg);
+          if (!input.message) return usage(chatId, 'Harness message cannot be empty.');
+          const reply = await agent.say(input.message);
+          await sendMessage(chatId, `<code>${esc(JSON.stringify({ id: input.id, ok: true, reply: reply?.content || '', model: CONFIG.AI_MODEL, rounds: reply?.rounds }))}</code>`);
+          return true;
+        }
+        case 'skills':
+        case 'skils': {
+          const action = rest.shift()?.toLowerCase() || 'list';
+          if (action === 'list') {
+            const skills = await listSkills();
+            await sendMessage(chatId, `<b>Skills</b>\n${skills.map(skill => `<code>${esc(skill.id)}</code>${skill.custom ? ' (custom)' : ''}${skill.description ? ` — ${esc(skill.description)}` : ''}`).join('\n') || '-'}`);
+            return true;
+          }
+          const name = rest.shift();
+          if (!name) return usage(chatId, 'Usage: /skills read|use|remove|add name');
+          if (action === 'read' || action === 'use') {
+            const skill = await loadSkill(name);
+            if (!skill) return usage(chatId, `Skill not found: ${name}`);
+            if (action === 'read') {
+              await sendMessage(chatId, `<b>${esc(skill.id)}</b>\n<pre>${esc(skill.content)}</pre>`);
+            } else {
+              const active = Array.isArray(agent?.memory?.all?.().active_skills) ? agent.memory.all().active_skills : [];
+              await agent.memory.remember('active_skills', [...new Set([...active, skill.id])]);
+              await sendMessage(chatId, `Skill activated: <code>${esc(skill.id)}</code>`);
+            }
+            return true;
+          }
+          if (action === 'remove') {
+            const removed = await removeSkill(name);
+            if (!removed && agent?.memory) {
+              const disabled = Array.isArray(agent.memory.all().disabled_skills) ? agent.memory.all().disabled_skills : [];
+              await agent.memory.remember('disabled_skills', [...new Set([...disabled, name.toLowerCase()])]);
+            }
+            await sendMessage(chatId, removed ? `Skill removed: <code>${esc(name)}</code>` : `Skill disabled: <code>${esc(name)}</code>`);
+            return true;
+          }
+          if (action === 'add') {
+            const body = rest.join(' ').trim();
+            const separator = body.indexOf('::');
+            if (separator < 0) return usage(chatId, 'Usage: /skills add name :: markdown content');
+            const skill = await saveSkill(name, body.slice(separator + 2).trim());
+            await sendMessage(chatId, `Skill saved: <code>${esc(skill.id)}</code>`);
+            return true;
+          }
+          return usage(chatId, 'Usage: /skills list|read|use|remove|add');
+        }
+        case 'soul':
+        case 'sould': {
+          const action = rest.shift()?.toLowerCase() || 'read';
+          if (action === 'read' || action === 'show') {
+            await sendMessage(chatId, `<b>SOUL</b>\n<pre>${esc(await readSoul())}</pre>`);
+          } else if (action === 'set') {
+            if (!arg) return usage(chatId, 'Usage: /soul set new prompt text');
+            await writeSoul(arg);
+            await sendMessage(chatId, 'SOUL updated.');
+          } else if (action === 'append') {
+            if (!arg) return usage(chatId, 'Usage: /soul append text');
+            await appendSoul(arg);
+            await sendMessage(chatId, 'SOUL appended.');
           } else {
-            await sendMessage(chatId, `anthropic: <code>${esc(CONFIG.ANTHROPIC_MODEL)}</code>\ngoogle: <code>${esc(CONFIG.GEMINI_MODEL)}</code>`);
+            return usage(chatId, 'Usage: /soul read|set|append');
+          }
+          return true;
+        }
+        case 'mcp': {
+          const action = rest.shift()?.toLowerCase() || 'list';
+          if (action === 'reload') {
+            if (!reloadMcpTools) return usage(chatId, 'MCP reload is not available.');
+            const loaded = await reloadMcpTools();
+            await sendMessage(chatId, `MCP reloaded. Tools: <code>${loaded.length}</code>`);
+          } else {
+            const tools = getMcpTools();
+            await sendMessage(chatId, `<b>MCP</b>\nservers: <code>${esc(mcpServers.map(server => server.name).join(', ') || '-')}</code>\ntools: <code>${esc(tools.map(tool => tool.name).join(', ') || '-')}</code>`);
           }
           return true;
         }

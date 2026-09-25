@@ -43,6 +43,7 @@ export const CONFIG = {
   // Telegram
   TELEGRAM_BOT_TOKEN: S('TELEGRAM_BOT_TOKEN', ''),
   ALLOWED_USER_ID: S('ALLOWED_USER_ID', ''),
+  MINI_APP_URL: S('MINI_APP_URL', ''),
 
   // Agent
   AGENT_NAME: S('AGENT_NAME', 'J-ROCK'),
