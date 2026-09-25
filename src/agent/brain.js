@@ -10,6 +10,66 @@ export async function chat(messages, provider = 'openai', tools = [], options = 
   return chatGemini(messages, key, tools, options);
 }
 
+function contentText(value) {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map(contentText).filter(Boolean).join('');
+  if (value && typeof value === 'object') return typeof value.text === 'string' ? value.text : '';
+  return '';
+}
+
+function responseError(data, provider) {
+  const detail = data?.error?.message || data?.error || data?.message;
+  if (detail) return new Error(`${provider} returned an error: ${String(detail).slice(0, 300)}`);
+  return new Error(`${provider} returned an invalid response: ${JSON.stringify(data).slice(0, 300)}`);
+}
+
+function normalizeOpenAiResponse(data, model) {
+  if (!data || data.error) throw responseError(data, 'openai');
+  const choice = Array.isArray(data.choices) ? data.choices[0] : null;
+  if (!choice) throw responseError(data, 'openai');
+  const message = choice.message || {};
+  const legacy = message.function_call || choice.message?.function_call;
+  const toolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length
+    ? message.tool_calls.map(call => ({ id: call.id, function: { name: call.function?.name, arguments: call.function?.arguments ?? '{}' } }))
+    : legacy
+      ? [{ id: legacy.id || 'legacy-call', function: { name: legacy.name, arguments: legacy.arguments ?? '{}' } }]
+      : [];
+  const text = contentText(message.content ?? choice.text);
+  if (!text && !toolCalls.length) throw responseError(data, 'openai');
+  return {
+    text,
+    toolCalls,
+    model: data.model || model,
+    finishReason: choice.finish_reason || null,
+  };
+}
+
+function normalizeAnthropicResponse(data, model) {
+  if (!data || data.error) throw responseError(data, 'anthropic');
+  const content = Array.isArray(data.content) ? data.content : [];
+  const toolCalls = content.filter(item => item?.type === 'tool_use').map(item => ({
+    id: item.id,
+    function: { name: item.name, arguments: JSON.stringify(item.input || {}) },
+  }));
+  const text = content.filter(item => item?.type === 'text').map(item => contentText(item.text)).join('');
+  if (!text && !toolCalls.length) throw responseError(data, 'anthropic');
+  return { text, toolCalls, model: data.model || model, finishReason: data.stop_reason || null };
+}
+
+function normalizeGeminiResponse(data, model) {
+  if (!data || data.error) throw responseError(data, 'gemini');
+  const candidateParts = Array.isArray(data.candidates) ? (data.candidates[0]?.content?.parts || []) : [];
+  const legacyParts = Array.isArray(data.content) ? data.content : [];
+  const parts = candidateParts.length ? candidateParts : legacyParts;
+  const toolCalls = parts.filter(part => part?.functionCall).map((part, index) => ({
+    id: part.functionCall.id || `gemini-${index}`,
+    function: { name: part.functionCall.name, arguments: JSON.stringify(part.functionCall.args || {}) },
+  }));
+  const text = parts.filter(part => typeof part?.text === 'string').map(part => part.text).join('');
+  if (!text && !toolCalls.length) throw responseError(data, 'gemini');
+  return { text, toolCalls, model, finishReason: data.candidates?.[0]?.finishReason || null };
+}
+
 export function resolveOpenAiUrl(base = CONFIG.AI_BASE_URL) {
   const configured = String(base || '').trim().replace(/\/+$/, '');
   if (!configured) return 'https://api.openai.com/v1/chat/completions';
@@ -73,7 +133,12 @@ async function probeOpenAiModel(model, signal) {
   });
   if (!res.ok) return false;
   const data = await res.json().catch(() => ({}));
-  return Boolean(data?.choices?.[0]?.message);
+  try {
+    const response = normalizeOpenAiResponse(data, model);
+    return Boolean(response.text || response.toolCalls.length);
+  } catch {
+    return false;
+  }
 }
 
 async function resolveOpenAiModel(signal) {
@@ -331,11 +396,7 @@ async function chatOpenAI(messages, key, tools, options) {
     throw new Error(`openai ${res.status} at ${endpoint} (model=${model}): ${(await res.text()).slice(0, 300)}`);
   }
   const data = await res.json();
-  const message = data.choices?.[0]?.message || {};
-  return {
-    text: message.content || '',
-    toolCalls: (message.tool_calls || []).map(call => ({ id: call.id, function: call.function })),
-  };
+  return normalizeOpenAiResponse(data, model);
 }
 
 async function chatAnthropic(messages, key, tools, options) {
@@ -353,11 +414,7 @@ async function chatAnthropic(messages, key, tools, options) {
   });
   if (!res.ok) throw new Error(`anthropic ${res.status}: ${(await res.text()).slice(0, 300)}`);
   const data = await res.json();
-  const content = Array.isArray(data.content) ? data.content : [];
-  return {
-    text: content.filter(item => item.type === 'text').map(item => item.text || '').join(''),
-    toolCalls: content.filter(item => item.type === 'tool_use').map(item => ({ id: item.id, function: { name: item.name, arguments: JSON.stringify(item.input || {}) } })),
-  };
+  return normalizeAnthropicResponse(data, model);
 }
 
 async function chatGemini(messages, key, tools, options) {
@@ -375,11 +432,7 @@ async function chatGemini(messages, key, tools, options) {
   });
   if (!res.ok) throw new Error(`gemini ${res.status}: ${(await res.text()).slice(0, 300)}`);
   const data = await res.json();
-  const parts = data.candidates?.[0]?.content?.parts || [];
-  return {
-    text: parts.filter(part => typeof part.text === 'string').map(part => part.text).join(''),
-    toolCalls: parts.filter(part => part.functionCall).map((part, index) => ({ id: part.functionCall.id || `gemini-${index}`, function: { name: part.functionCall.name, arguments: JSON.stringify(part.functionCall.args || {}) } })),
-  };
+  return normalizeGeminiResponse(data, model);
 }
 
 export function buildOpenAIReq(messages) {

@@ -76,6 +76,12 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           const [key, ...parts] = rest;
           if (!key || !parts.length) return usage(chatId, 'Usage: /set key value');
           if (key === 'dry_run' || key === 'auto_trade') return usage(chatId, 'Use /dryrun or /autotrade for safety switches.');
+          if (key === 'order_unit') {
+            const requestedUnit = parts.join(' ').trim().toLowerCase().replace(/[ -]+/g, '_').replace(/^by_/, '');
+            if (!['cost', 'qty', 'position_size', 'position', 'position_sizing', 'size'].includes(requestedUnit)) {
+              return usage(chatId, 'order_unit accepts cost (Cost Value: cost × leverage ÷ price), qty (Quantity Value: explicit quantity), or position_size (Nominal Value: nominal ÷ price, leverage-independent).');
+            }
+          }
           const value = parseSettingValue(key, parts.join(' '));
           if (key === 'symbol' && String(value).toUpperCase() !== CONFIG.symbol) {
             const positions = await client.getPendingPositions(CONFIG.symbol);
@@ -334,7 +340,11 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           return true;
         }
         case 'diag': {
-          await sendMessage(chatId, `<b>Diag</b>\napi <code>${client ? 'ready' : 'missing'}</code>\ndb <code>${CONFIG.DATABASE_URL ? 'postgres' : 'file'}</code>\nws <code>configured</code>`);
+          const provider = detectProviders();
+          const modelKey = provider === 'openai' ? 'AI_MODEL' : provider === 'anthropic' ? 'ANTHROPIC_MODEL' : 'GEMINI_MODEL';
+          const keyName = provider === 'openai' ? 'AI_API_KEY' : provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'GEMINI_API_KEY';
+          const lastError = agent?.lastError ? String(agent.lastError).slice(0, 300) : 'none';
+          await sendMessage(chatId, `<b>Diag</b>\napi <code>${client ? 'ready' : 'missing'}</code>\ndb <code>${CONFIG.DATABASE_URL ? 'postgres' : 'file'}</code>\nws <code>configured</code>\nllm <code>${esc(provider)}</code> model <code>${esc(CONFIG[modelKey] || 'AUTO')}</code> resolved <code>${esc(agent?.lastModel || '-')}</code> key <code>${CONFIG[keyName] ? 'set' : 'missing'}</code>\nlast_error <code>${esc(lastError)}</code>`);
           return true;
         }
         default:

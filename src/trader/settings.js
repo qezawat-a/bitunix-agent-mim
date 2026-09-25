@@ -69,7 +69,7 @@ const BOOLEAN_KEYS = new Set(['dry_run', 'auto_trade', 'reversal_enabled']);
 const ENUMS = {
   position_type: ['crossed', 'isolated'],
   position_mode: ['hedge', 'one-way'],
-  order_unit: ['cost', 'qty'],
+  order_unit: ['cost', 'qty', 'position_size'],
   on_tpsl_failure: ['cancel', 'close', 'alert'],
 };
 
@@ -84,7 +84,14 @@ function normalizeValue(key, value) {
     return [...new Set(values.map(item => String(item).trim().toLowerCase()).filter(Boolean))];
   }
   if (key === 'position_type' || key === 'position_mode') return String(value).trim().toLowerCase();
-  if (key === 'order_unit' || key === 'on_tpsl_failure') return String(value).trim().toLowerCase();
+  if (key === 'order_unit') {
+    const normalized = String(value).trim().toLowerCase().replace(/[ -]+/g, '_').replace(/^by_/, '');
+    if (['position', 'position_size', 'position_sizing', 'size', 'sizing'].includes(normalized)) return 'position_size';
+    if (['quantity', 'qty'].includes(normalized)) return 'qty';
+    if (['cost', 'notional'].includes(normalized)) return 'cost';
+    return normalized;
+  }
+  if (key === 'on_tpsl_failure') return String(value).trim().toLowerCase();
   return value;
 }
 
@@ -228,5 +235,6 @@ export function parseSettingValue(key, raw) {
     if (!Number.isFinite(value)) throw new Error(`${canonical} must be numeric`);
     return value;
   }
+  if (canonical === 'order_unit') return normalizeValue(canonical, raw);
   return raw;
 }

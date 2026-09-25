@@ -5,12 +5,18 @@ function positiveNumber(value) {
   return Number.isFinite(number) && number > 0;
 }
 
-export function computeQty({ available, price, leverage }) {
-  if (!positiveNumber(available) || !positiveNumber(price)) return 0;
+export function computeQty({ available, price, leverage, unit = CONFIG.order_unit, quantity = null }) {
+  if (!positiveNumber(price)) return 0;
+  const selectedUnit = String(unit || 'cost').trim().toLowerCase().replace(/[ -]+/g, '_');
+  if (selectedUnit === 'qty') return positiveNumber(quantity) ? Math.floor(Number(quantity) * 10000) / 10000 : 0;
+  if (!positiveNumber(available) || !['cost', 'position_size'].includes(selectedUnit)) return 0;
   const selectedLeverage = Number.isInteger(leverage) ? leverage : CONFIG.leverage;
-  if (!Number.isInteger(selectedLeverage) || selectedLeverage < 1 || selectedLeverage > 125) return 0;
-  const notional = Number(available) * Number(CONFIG.margin_amount_pct) / 100;
-  const size = notional / Number(price) * selectedLeverage;
+  if (selectedUnit === 'position_size' && (!Number.isInteger(selectedLeverage) || selectedLeverage < 1 || selectedLeverage > 125)) return 0;
+  const percentage = selectedUnit === 'position_size' ? Number(CONFIG.position_sizing_margin_pct) : Number(CONFIG.margin_amount_pct);
+  if (!positiveNumber(percentage)) return 0;
+  const baseNotional = Number(available) * percentage / 100;
+  const notional = selectedUnit === 'cost' ? baseNotional * selectedLeverage : baseNotional;
+  const size = notional / Number(price);
   return Number.isFinite(size) && size > 0 ? Math.floor(size * 10000) / 10000 : 0;
 }
 

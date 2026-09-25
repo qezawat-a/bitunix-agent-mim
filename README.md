@@ -28,6 +28,8 @@ endpoint; there are no baked-in fallback model IDs.
 - Multi-timeframe signal gate (`1m`, `3m`, `5m`, `15m`, `1h`): min confidence, tf confidence, agreement,
   confirm scans, cooldown
 - Dynamic ATR-based TP/SL, breakeven, trailing, liquidation-distance guard
+- Bitunix order units: `cost` (Cost Value), `qty` (Quantity Value), and
+  `position_size` (Nominal Value); leverage affects Cost Value sizing only
 - Autonomous agent loop with thinking levels, model auto-refresh, sessions
 - Telegram bot: `/status`, `/start`, `/stop`, `/settings`, `/dryrun`,
   `/autotrade`, `/memory`, `/resume`, `/models`, `/setModels`, `/harness`,

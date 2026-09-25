@@ -14,7 +14,7 @@ import { parseThinkingLevel } from '../src/agent/thinking.js';
 import { CONFIG, parseBoolean, applySettingsFile } from '../src/config.js';
 import { BitunixClient, canonicalQuery } from '../src/bitunix/client.js';
 import Scanner from '../src/bitunix/scanner.js';
-import { liqDistanceOk } from '../src/bitunix/risk.js';
+import { computeQty, liqDistanceOk } from '../src/bitunix/risk.js';
 import { Trader } from '../src/trader/trader.js';
 import { PositionManager } from '../src/trader/position-manager.js';
 import { setPositionManager, setTraderInstances, traderTools } from '../src/trader/agent-tools.js';
@@ -94,6 +94,14 @@ describe('settings', () => {
   it('validate catches bad leverage', () => {
     const errs = validateSettings({ ...normalizeSettings({}), leverage: 999 });
     assert.ok(errs.length > 0);
+  });
+
+  it('supports the three official futures order units', () => {
+    const settings = normalizeSettings({ order_unit: 'position sizing' });
+    assert.equal(settings.order_unit, 'position_size');
+    assert.deepEqual(validateSettings(settings), []);
+    assert.equal(normalizeSettings({ order_unit: 'qty' }).order_unit, 'qty');
+    assert.equal(normalizeSettings({ order_unit: 'cost' }).order_unit, 'cost');
   });
 });
 
@@ -271,6 +279,30 @@ describe('exchange safety', () => {
     assert.equal(headers.sign, expected);
     assert.match(headers.timestamp, /^\d{13}$/);
     assert.equal(headers['api-key'], 'test-key');
+  });
+
+  it('applies nominal, cost, and quantity order-unit semantics', async () => {
+    const client = { getAccount: async () => ({ available: '1000' }) };
+    const trader = new Trader(client);
+    Object.assign(CONFIG, { order_unit: 'cost', margin_amount_pct: 2, position_sizing_margin_pct: 3, leverage: 10 });
+    assert.equal(await trader.computePositionSize(100), 2);
+    CONFIG.order_unit = 'position_size';
+    assert.equal(await trader.computePositionSize(100), 0.3);
+    CONFIG.leverage = 5;
+    assert.equal(await trader.computePositionSize(100), 0.3);
+    CONFIG.order_unit = 'qty';
+    await assert.rejects(() => trader.computePositionSize(100), /explicit quantity/);
+    assert.equal(computeQty({ available: 1000, price: 100, unit: 'position_size', leverage: 10 }), 0.3);
+    assert.equal(computeQty({ available: 1000, price: 100, unit: 'cost', leverage: 10 }), 2);
+  });
+
+  it('never returns a silent generic answer for an empty LLM response', async () => {
+    Object.assign(CONFIG, { AI_PROVIDER: 'openai', AI_API_KEY: 'test-key', AI_BASE_URL: 'https://provider.test/v1', AI_MODEL: 'test-model' });
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: null }, finish_reason: 'stop' }] }) });
+    const agent = createAgent({ system: 'rules', tools: [] });
+    const reply = await agent.say('hello');
+    assert.match(reply.content, /LLM error|returned no text/);
+    assert.doesNotMatch(reply.content, /Hichi bar nagasht/);
   });
 
   it('fails closed when liquidation data is missing', () => {
@@ -619,6 +651,8 @@ describe('telegram command routing', () => {
     assert.deepEqual(messages, ['hello']);
     assert.equal(await handleCommand(message, '/skils'), true);
     assert.equal(await handleCommand(message, '/sould'), true);
+    assert.equal(await handleCommand(message, '/set order_unit by position size'), true);
+    assert.equal(CONFIG.order_unit, 'position_size');
     assert.ok(telegramRequests.some(item => item.url.endsWith('/sendMessage') && String(item.body.text).includes('echo:hello')));
   });
 });

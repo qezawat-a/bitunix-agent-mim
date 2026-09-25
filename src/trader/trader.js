@@ -223,14 +223,24 @@ export class Trader {
 
   async computePositionSize(entryPrice) {
     if (!validPositive(entryPrice)) throw new Error('entry price must be positive');
+    const unit = String(CONFIG.order_unit || 'cost').trim().toLowerCase().replace(/[ -]+/g, '_');
+    if (unit === 'qty') {
+      throw new Error('order_unit=qty requires an explicit quantity for this order; autonomous sizing supports cost or position_size');
+    }
+    if (!['cost', 'position_size'].includes(unit)) throw new Error('order_unit must be cost, qty, or position_size');
     if (!Number.isInteger(CONFIG.leverage) || CONFIG.leverage < 1 || CONFIG.leverage > 125) {
       throw new Error('leverage must be an integer 1-125');
     }
     const account = await this.client.getAccount('USDT');
     const available = Number(account?.available);
     if (!validPositive(available)) throw new Error('available USDT balance must be positive');
-    const notional = available * Number(CONFIG.margin_amount_pct) / 100;
-    const size = notional / Number(entryPrice) * CONFIG.leverage;
+    const percentage = unit === 'position_size' ? Number(CONFIG.position_sizing_margin_pct) : Number(CONFIG.margin_amount_pct);
+    if (!validPositive(percentage)) throw new Error(`${unit === 'position_size' ? 'position_sizing_margin_pct' : 'margin_amount_pct'} must be positive`);
+    const baseNotional = available * percentage / 100;
+    // Bitunix order units: position_size is Nominal Value (leverage-independent);
+    // cost is Cost Value (margin allocated, so leverage changes the quantity).
+    const notional = unit === 'cost' ? baseNotional * CONFIG.leverage : baseNotional;
+    const size = notional / Number(entryPrice);
     if (!validPositive(size)) throw new Error('calculated position size must be positive');
     return Math.floor(size * 100000000) / 100000000;
   }
