@@ -1,6 +1,26 @@
 import crypto from 'crypto';
 import { CONFIG } from '../config.js';
 
+function positiveNumber(value) {
+  if (value === '' || value === null || value === undefined) return false;
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0;
+}
+
+function validateOrder(params) {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) throw new Error('order parameters must be an object');
+  if (typeof params.symbol !== 'string' || !/^[A-Z0-9]{5,32}$/.test(params.symbol)) throw new Error('invalid order symbol');
+  if (!['BUY', 'SELL'].includes(params.side)) throw new Error('order side must be BUY or SELL');
+  if (!positiveNumber(params.qty)) throw new Error('order qty must be positive');
+  const orderType = params.orderType || 'MARKET';
+  if (!['LIMIT', 'MARKET'].includes(orderType)) throw new Error('orderType must be LIMIT or MARKET');
+  if (orderType === 'LIMIT' && !positiveNumber(params.price)) throw new Error('LIMIT order price must be positive');
+  if (!['OPEN', 'CLOSE'].includes(params.tradeSide)) throw new Error('tradeSide must be OPEN or CLOSE');
+  if (params.tradeSide === 'CLOSE' && (typeof params.positionId !== 'string' || !params.positionId.trim())) {
+    throw new Error('CLOSE order requires positionId');
+  }
+}
+
 export class BitunixClient {
   baseURL = CONFIG.BITUNIX_BASE_URL;
   apiKey = CONFIG.BITUNIX_API_KEY;
@@ -9,7 +29,7 @@ export class BitunixClient {
   static sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
 
   makeSign(path, body, queryParams = {}) {
-    const nonce = Math.floor(Math.random() * 1000000000).toString();
+    const nonce = crypto.randomBytes(8).readBigUInt64BE().toString();
     const timestamp = Date.now().toString();
     const cleanParams = Object.fromEntries(
       Object.entries(queryParams).filter(([, v]) => v !== '' && v !== undefined && v !== null)
@@ -25,7 +45,7 @@ export class BitunixClient {
     return { 'api-key': this.apiKey, nonce, timestamp, sign };
   }
 
-  async request(method, path, body = null, queryParams = {}) {
+  async request(method, path, body = null, queryParams = {}, options = {}) {
     const headers = {
       'Content-Type': 'application/json',
       'language': 'en-US',
@@ -34,27 +54,39 @@ export class BitunixClient {
     const cleanParams = Object.fromEntries(
       Object.entries(queryParams).filter(([, v]) => v !== '' && v !== undefined && v !== null)
     );
-    const url = `${this.baseURL}${path}?${new URLSearchParams(cleanParams)}`;
-    const opts = {
+    const query = new URLSearchParams(cleanParams).toString();
+    const url = `${this.baseURL}${path}${query ? `?${query}` : ''}`;
+    const timeoutMs = options.timeoutMs ?? 15000;
+    const signal = options.signal ?? AbortSignal.timeout(timeoutMs);
+    const res = await fetch(url, {
       method,
       headers,
       body: body ? JSON.stringify(body) : undefined,
-    };
-    const res = await fetch(url, opts);
+      signal,
+    });
     if (!res.ok) {
       const txt = await res.text();
       throw new Error(`Bitunix ${method} ${path} ${res.status}: ${txt}`);
     }
-    const data = await res.json();
-    return data?.data ?? null;
+    const payload = await res.json();
+    if (payload && Object.hasOwn(payload, 'code') && Number(payload.code) !== 0) {
+      throw new Error(`Bitunix ${method} ${path} rejected: ${payload.code} ${payload.msg || ''}`.trim());
+    }
+    if (payload?.data === null || payload?.data === undefined) {
+      throw new Error(`Bitunix ${method} ${path} returned no data`);
+    }
+    return payload.data;
   }
 
   async getAccount(marginCoin = 'USDT') {
     const data = await this.request('GET', '/api/v1/futures/account', null, { marginCoin });
     if (Array.isArray(data)) {
-      return data.find((a) => a.marginCoin === marginCoin) || data[0] || {};
+      const account = data.find(item => item.marginCoin === marginCoin);
+      if (!account) throw new Error(`Bitunix account ${marginCoin} not found`);
+      return account;
     }
-    return data || {};
+    if (!data || data.marginCoin !== marginCoin) throw new Error(`Bitunix account ${marginCoin} not found`);
+    return data;
   }
 
   async getKlines(symbol, interval = '15m', limit = 200, startTime = 0, endTime = 0, type = 'LAST_PRICE') {
@@ -71,6 +103,7 @@ export class BitunixClient {
   }
 
   async placeOrder(params) {
+    validateOrder(params);
     return this.request('POST', '/api/v1/futures/trade/place_order', params, {});
   }
 
@@ -80,6 +113,32 @@ export class BitunixClient {
 
   async cancelOrder(symbol, orderId) {
     return this.request('POST', '/api/v1/futures/trade/cancel_orders', { symbol, orderId }, {});
+  }
+
+  async closePosition(symbol, positionId, position = null) {
+    let target = position;
+    if (!target) {
+      const positions = await this.getPendingPositions(symbol);
+      target = Array.isArray(positions) ? positions.find(item => String(item.positionId) === String(positionId)) : null;
+    }
+    if (!target || String(target.symbol || '').toUpperCase() !== String(symbol).toUpperCase() || String(target.positionId) !== String(positionId)) {
+      throw new Error(`position ${positionId} not found for ${symbol}`);
+    }
+    const quantity = target.size ?? target.qty ?? target.positionQty ?? target.positionSize;
+    if (!positiveNumber(quantity)) throw new Error(`position ${positionId} has no valid size`);
+    const positionSide = String(target.side || '').toUpperCase();
+    if (!['BUY', 'SELL'].includes(positionSide)) throw new Error(`position ${positionId} has an invalid side`);
+    const side = positionSide === 'BUY' ? 'SELL' : 'BUY';
+    return this.placeOrder({
+      symbol,
+      side,
+      qty: String(quantity),
+      orderType: 'MARKET',
+      effect: 'GTC',
+      tradeSide: 'CLOSE',
+      reduceOnly: true,
+      positionId,
+    });
   }
 
   async closeAllPosition(symbol) {
@@ -104,65 +163,70 @@ export class BitunixClient {
 
   async getHistoryPositions(symbol) {
     return this.request('GET', '/api/v1/futures/position/get_history_positions', null, { symbol });
- }
+  }
 
   async getPendingTPSL(symbol) {
     return this.request('GET', '/api/v1/futures/tp_sl/get_pending_tp_sl_order', null, { symbol });
- }
+  }
 
   async getHistoryTPSL(symbol) {
     return this.request('GET', '/api/v1/futures/tp_sl/get_history_tp_sl_order', null, { symbol });
- }
+  }
 
   async changeLeverage(symbol, leverage) {
+    if (!Number.isInteger(leverage) || leverage < 1 || leverage > 125) throw new Error('leverage must be an integer 1-125');
     return this.request('POST', '/api/v1/futures/account/change_leverage', { symbol, leverage }, {});
- }
+  }
 
   async changeMarginMode(symbol, marginMode) {
+    if (!['crossed', 'isolated'].includes(marginMode)) throw new Error('marginMode must be crossed or isolated');
     return this.request('POST', '/api/v1/futures/account/change_margin_mode', { symbol, marginMode }, {});
- }
+  }
 
   async changePositionMode(symbol, positionMode) {
-    return this.request('POST', '/api/v1/futures/account/change_position_mode', { symbol, positionMode }, {});
- }
+    const normalized = { 'one-way': 'ONE_WAY', one_way: 'ONE_WAY', hedge: 'HEDGE' }[positionMode];
+    if (!normalized) throw new Error('positionMode must be one-way or hedge');
+    return this.request('POST', '/api/v1/futures/account/change_position_mode', { symbol, positionMode: normalized }, {});
+  }
 
   async adjustPositionMargin(symbol, margin) {
+    if (!Number.isFinite(Number(margin))) throw new Error('margin must be numeric');
     return this.request('POST', '/api/v1/futures/account/adjust_position_margin', { symbol, margin }, {});
- }
+  }
 
   async getFundingRate(symbol) {
     return this.request('GET', '/api/v1/futures/market/funding_rate', null, { symbol });
- }
+  }
 
   async getFundingRateBatch(symbols) {
     return this.request('GET', '/api/v1/futures/market/funding_rate_batch', null, { symbols: Array.isArray(symbols) ? symbols.join(',') : symbols });
- }
+  }
 
   async getTradingPairs() {
     return this.request('GET', '/api/v1/futures/market/trading_pairs', null, {});
- }
+  }
 
   async getLeverageAndMarginMode(symbol) {
     return this.request('GET', '/api/v1/futures/account/leverage_and_margin_mode', null, { symbol });
- }
+  }
 
   async getPendingOrders(symbol) {
     return this.request('GET', '/api/v1/futures/trade/get_pending_orders', null, { symbol });
- }
+  }
 
   async getHistoryOrders(symbol) {
     return this.request('GET', '/api/v1/futures/trade/get_history_orders', null, { symbol });
- }
+  }
 
   async getHistoryTrades(symbol) {
     return this.request('GET', '/api/v1/futures/trade/get_history_trades', null, { symbol });
- }
+  }
 
   async flashClosePosition(symbol) {
     return this.request('POST', '/api/v1/futures/trade/flash_close_position', { symbol }, {});
- }
+  }
 
   async getErrorCode(code) {
     return { code, hint: 'See https://www.bitunix.com/api-docs/futures/ErrorCode/error_code.html' };
- }
+  }
 }

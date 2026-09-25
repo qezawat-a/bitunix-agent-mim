@@ -1,73 +1,73 @@
-import { BitunixClient } from './client.js';
 import { computeSignal } from './indicators.js';
 import { CONFIG } from '../config.js';
 
 class Scanner {
   client;
-  constructor(client) { this.client = client; }
 
-  async getKlinesFor(symbol, tfs) {
-    const out = {};
-    for (const tf of tfs) {
-      const kl = await this.client.getKlines(symbol, tf, 200);
-      out[tf] = kl || [];
-    }
-    return out;
+  constructor(client) {
+    this.client = client;
   }
 
-  async getVolumes(symbol) {
-    const kl = await this.client.getKlines(symbol, '1m', 200);
-    return kl.map(k => parseFloat(k.baseVol || 0));
+  async getKlinesFor(symbol, timeframes) {
+    const output = {};
+    for (const timeframe of timeframes) {
+      const klines = await this.client.getKlines(symbol, timeframe, 200);
+      if (!Array.isArray(klines) || klines.length < 60) throw new Error(`invalid ${timeframe} kline response for ${symbol}`);
+      output[timeframe] = klines;
+    }
+    return output;
   }
 
   async getFunding(symbol) {
     try {
       const data = await this.client.getFundingRate(symbol);
-      return typeof data?.value === 'number' ? data.value : 0;
-    } catch { return 0; }
+      const value = Number(data?.value);
+      return Number.isFinite(value) ? value : 0;
+    } catch {
+      return 0;
+    }
   }
 
   async scan(symbol) {
-    const tfs = CONFIG.timeframes;
-    const klinesMap = await this.getKlinesFor(symbol, tfs);
-    const volumes = await this.getVolumes(symbol);
+    const timeframes = CONFIG.timeframes;
+    const klinesMap = await this.getKlinesFor(symbol, timeframes);
     const funding = await this.getFunding(symbol);
-
     const tfSignals = {};
+    const directionCounts = { bullish: 0, bearish: 0, neutral: 0 };
+    const allDirectionCounts = { bullish: 0, bearish: 0, neutral: 0 };
     let scoreSum = 0;
     let validCount = 0;
     let agree = 0;
-    const lastPrice = klinesMap[tfs[0]]?.slice(-1)[0]?.close;
 
-    for (const tf of tfs) {
-      const kl = klinesMap[tf] || [];
-      const res = computeSignal(kl, volumes, funding);
-      tfSignals[tf] = res;
-      if (res.confidence >= CONFIG.tf_min_confidence) {
-        validCount += 1;
-        scoreSum += res.confidence;
-        if (res.direction !== 'neutral') agree += 1;
+    for (const timeframe of timeframes) {
+      const klines = klinesMap[timeframe];
+      const volumes = klines.map(kline => Number(kline.baseVol));
+      const result = computeSignal(klines, volumes, funding);
+      tfSignals[timeframe] = result;
+      allDirectionCounts[result.direction]++;
+      if (result.confidence >= CONFIG.tf_min_confidence) {
+        validCount++;
+        scoreSum += result.confidence;
+        directionCounts[result.direction]++;
+        if (result.direction !== 'neutral') agree++;
       }
     }
 
-    const directionCounts = { bullish: 0, bearish: 0, neutral: 0 };
-    Object.values(tfSignals).forEach(s => { directionCounts[s.direction]++; });
-    const agreedDirection = Object.entries(directionCounts).reduce((a, b) => a[1] > b[1] ? a : b)[0];
-
-    const avgConf = validCount > 0 ? scoreSum / validCount : 0;
+    const direction = directionCounts.bullish === directionCounts.bearish
+      ? 'neutral'
+      : directionCounts.bullish > directionCounts.bearish ? 'bullish' : 'bearish';
+    const averageConfidence = validCount ? scoreSum / validCount : 0;
     let signal = 'hold';
     let confidence = 0;
-    if (validCount >= CONFIG.min_agreeing_strategies && agree >= CONFIG.min_agreeing_strategies) {
-      if (agreedDirection === 'bullish' || agreedDirection === 'bearish') {
-        signal = agreedDirection;
-        confidence = Math.min(100, avgConf);
-      }
-    } else if (avgConf >= CONFIG.min_confidence) {
-      signal = agreedDirection === 'neutral' ? 'hold' : agreedDirection;
-      confidence = avgConf;
+    if (averageConfidence >= CONFIG.min_confidence && validCount >= CONFIG.min_agreeing_strategies && agree >= CONFIG.min_agreeing_strategies && direction !== 'neutral') {
+      signal = direction;
+      confidence = Math.min(100, averageConfidence);
     }
 
-    return { symbol, signal, confidence, lastPrice, tfSignals, directionCounts };
+    const lastPrice = klinesMap[timeframes[0]]?.slice(-1)[0]?.close;
+    if (!Number.isFinite(Number(lastPrice)) || Number(lastPrice) <= 0) throw new Error(`invalid latest price for ${symbol}`);
+    return { symbol, signal, confidence, lastPrice, tfSignals, directionCounts, allDirectionCounts };
   }
 }
+
 export default Scanner;

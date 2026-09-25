@@ -1,28 +1,40 @@
-import { BitunixClient } from '../bitunix/client.js';
-import { Trader } from './trader.js';
-import { PositionManager } from './position-manager.js';
 import { CONFIG } from '../config.js';
+import { applySettings, getTraderSettings } from './settings.js';
 
 let sharedTrader = null;
 let sharedClient = null;
+let sharedPositionManager = null;
 
 export function setTraderInstances(trader, client) {
   sharedTrader = trader;
   sharedClient = client;
 }
 
+export function setPositionManager(pm) {
+  sharedPositionManager = pm;
+}
+
+function requireClient() {
+  if (!sharedClient) throw new Error('Client not ready');
+  return sharedClient;
+}
+
+function markCooldown() {
+  if (sharedTrader?.state) sharedTrader.state.cooldownUntil = Date.now() + Number(CONFIG.cooldown_minutes) * 60000;
+}
+
 export const traderTools = [
   {
     name: 'trader_get_settings',
-    description: 'Get all trader settings',
+    description: 'Get non-secret trader settings',
     parameters: { type: 'object', properties: {} },
     async handler() {
-      return { settings: CONFIG };
+      return { settings: getTraderSettings(CONFIG) };
     },
   },
   {
     name: 'trader_set_setting',
-    description: 'Update a trader setting',
+    description: 'Update one validated non-safety trader setting',
     parameters: {
       type: 'object',
       properties: {
@@ -32,8 +44,14 @@ export const traderTools = [
       required: ['key', 'value'],
     },
     async handler({ key, value }) {
-      CONFIG[key] = value;
-      return { ok: true, key, value };
+      if (key === 'dry_run' || key === 'auto_trade') throw new Error('safety switches require an authenticated command');
+      if (key === 'symbol' && String(value).toUpperCase() !== CONFIG.symbol) {
+        const client = requireClient();
+        const positions = await client.getPendingPositions(CONFIG.symbol);
+        if (!Array.isArray(positions) || positions.length) throw new Error('cannot change symbol while positions are open');
+      }
+      const settings = applySettings(CONFIG, { [key]: value });
+      return { ok: true, key, value: settings[key] };
     },
   },
   {
@@ -42,13 +60,13 @@ export const traderTools = [
     parameters: { type: 'object', properties: {} },
     async handler() {
       if (!sharedPositionManager) return { positions: [] };
-      await sharedPositionManager.fetchPositions();
-      return { positions: sharedPositionManager.state.positions };
+      const positions = await sharedPositionManager.fetchPositions();
+      return { positions };
     },
   },
   {
     name: 'trader_open_position',
-    description: 'Manually open a position',
+    description: 'Manually open a position after explicit live-mode approval',
     parameters: {
       type: 'object',
       properties: {
@@ -60,14 +78,30 @@ export const traderTools = [
       required: ['symbol', 'side', 'qty'],
     },
     async handler({ symbol, side, qty, price }) {
-      if (!sharedClient) throw new Error('Client not ready');
-      const order = await sharedClient.placeOrder({ symbol, side, qty, price: price || '', orderType: price ? 'LIMIT' : 'MARKET', effect: 'GTC', tradeSide: 'OPEN', reduceOnly: false });
+      const client = requireClient();
+      const params = {
+        symbol: String(symbol).toUpperCase(),
+        side,
+        qty: String(qty),
+        price: price ? String(price) : '',
+        orderType: price ? 'LIMIT' : 'MARKET',
+        effect: 'GTC',
+        tradeSide: 'OPEN',
+        reduceOnly: false,
+      };
+      if (CONFIG.dry_run) {
+        markCooldown();
+        return { dryRun: true, params };
+      }
+      const order = await client.placeOrder(params);
+      markCooldown();
+      if (sharedTrader?.reconcilePositions) await sharedTrader.reconcilePositions();
       return { order };
     },
   },
   {
     name: 'trader_close_position',
-    description: 'Close a specific position',
+    description: 'Close one position by its exact position ID',
     parameters: {
       type: 'object',
       properties: {
@@ -77,19 +111,31 @@ export const traderTools = [
       required: ['symbol', 'positionId'],
     },
     async handler({ symbol, positionId }) {
-      if (!sharedClient) throw new Error('Client not ready');
-      const res = await sharedClient.closeAllPosition(symbol);
-      return { res };
+      const client = requireClient();
+      const normalizedSymbol = String(symbol).toUpperCase();
+      if (CONFIG.dry_run) {
+        markCooldown();
+        return { dryRun: true, symbol: normalizedSymbol, positionId };
+      }
+      const result = await client.closePosition(normalizedSymbol, positionId);
+      markCooldown();
+      return { result };
     },
   },
   {
     name: 'trader_close_all',
-    description: 'Close all positions for symbol',
+    description: 'Close every position for one explicitly named symbol',
     parameters: { type: 'object', properties: { symbol: { type: 'string' } }, required: ['symbol'] },
     async handler({ symbol }) {
-      if (!sharedClient) throw new Error('Client not ready');
-      const res = await sharedClient.closeAllPosition(symbol);
-      return { res };
+      const client = requireClient();
+      const normalizedSymbol = String(symbol).toUpperCase();
+      if (CONFIG.dry_run) {
+        markCooldown();
+        return { dryRun: true, symbol: normalizedSymbol };
+      }
+      const result = await client.closeAllPosition(normalizedSymbol);
+      markCooldown();
+      return { result };
     },
   },
   {
@@ -97,8 +143,12 @@ export const traderTools = [
     description: 'Change leverage',
     parameters: { type: 'object', properties: { symbol: { type: 'string' }, leverage: { type: 'number' } }, required: ['symbol', 'leverage'] },
     async handler({ symbol, leverage }) {
-      if (!sharedClient) throw new Error('Client not ready');
-      return sharedClient.changeLeverage(symbol, leverage);
+      const client = requireClient();
+      const normalizedSymbol = String(symbol).toUpperCase();
+      if (CONFIG.dry_run) return { dryRun: true, symbol: normalizedSymbol, leverage };
+      const result = await client.changeLeverage(normalizedSymbol, leverage);
+      if (normalizedSymbol === CONFIG.symbol) applySettings(CONFIG, { leverage });
+      return result;
     },
   },
   {
@@ -106,26 +156,32 @@ export const traderTools = [
     description: 'Change margin mode',
     parameters: { type: 'object', properties: { symbol: { type: 'string' }, marginMode: { type: 'string', enum: ['crossed', 'isolated'] } }, required: ['symbol', 'marginMode'] },
     async handler({ symbol, marginMode }) {
-      if (!sharedClient) throw new Error('Client not ready');
-      return sharedClient.changeMarginMode(symbol, marginMode);
+      const client = requireClient();
+      const normalizedSymbol = String(symbol).toUpperCase();
+      if (CONFIG.dry_run) return { dryRun: true, symbol: normalizedSymbol, marginMode };
+      const result = await client.changeMarginMode(normalizedSymbol, marginMode);
+      if (normalizedSymbol === CONFIG.symbol) applySettings(CONFIG, { position_type: marginMode });
+      return result;
     },
   },
   {
     name: 'trader_set_dry_run',
-    description: 'Toggle dry run mode',
+    description: 'Enable dry-run mode; live mode requires an authenticated Telegram command',
     parameters: { type: 'object', properties: { enabled: { type: 'boolean' } }, required: ['enabled'] },
     async handler({ enabled }) {
-      CONFIG.dry_run = enabled;
-      return { ok: true, dry_run: enabled };
+      if (!enabled) throw new Error('live mode cannot be enabled through an LLM tool');
+      CONFIG.dry_run = true;
+      return { ok: true, dry_run: true };
     },
   },
   {
     name: 'trader_set_auto_trade',
-    description: 'Toggle auto trade',
+    description: 'Disable autonomous trading; enabling requires an authenticated Telegram command',
     parameters: { type: 'object', properties: { enabled: { type: 'boolean' } }, required: ['enabled'] },
     async handler({ enabled }) {
-      CONFIG.auto_trade = enabled;
-      return { ok: true, auto_trade: enabled };
+      if (enabled) throw new Error('auto-trade cannot be enabled through an LLM tool');
+      CONFIG.auto_trade = false;
+      return { ok: true, auto_trade: false };
     },
   },
   {
@@ -133,25 +189,20 @@ export const traderTools = [
     description: 'Get USDT balance',
     parameters: { type: 'object', properties: {} },
     async handler() {
-      if (!sharedClient) throw new Error('Client not ready');
-      const acc = await sharedClient.getAccount('USDT');
-      return { balance: acc };
+      return { balance: await requireClient().getAccount('USDT') };
     },
   },
   {
     name: 'trader_get_history',
     description: 'Get order/position history',
-    parameters: { type: 'object', properties: { symbol: { type: 'string' } } },
+    parameters: { type: 'object', properties: { symbol: { type: 'string' } }, required: ['symbol'] },
     async handler({ symbol }) {
-      if (!sharedClient) throw new Error('Client not ready');
+      const client = requireClient();
       const [orders, positions] = await Promise.all([
-        sharedClient.getHistoryOrders(symbol || CONFIG.symbol),
-        sharedClient.getHistoryPositions(symbol || CONFIG.symbol),
+        client.getHistoryOrders(symbol || CONFIG.symbol),
+        client.getHistoryPositions(symbol || CONFIG.symbol),
       ]);
       return { orders, positions };
     },
   },
 ];
-
-let sharedPositionManager = null;
-export function setPositionManager(pm) { sharedPositionManager = pm; }

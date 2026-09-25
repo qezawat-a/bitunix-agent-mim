@@ -2,7 +2,34 @@ import { CONFIG } from '../config.js';
 import { parseThinkingLevel } from './thinking.js';
 import { chat } from './brain.js';
 import { detectProviders } from './config.js';
-import { withTimeout } from './tools.js';
+import { withTimeout, validateToolArguments, stringifyToolResult } from './tools.js';
+
+function resolveSystem(agent) {
+  return typeof agent.system === 'function' ? agent.system() : Promise.resolve(agent.system);
+}
+
+function cleanHistory(history, provider) {
+  return history
+    .filter(message => {
+      if (!message || typeof message !== 'object') return false;
+      if (provider === 'openai') return ['user', 'assistant', 'tool'].includes(message.role);
+      return ['user', 'assistant'].includes(message.role) && typeof message.content === 'string' && message.content.length > 0;
+    })
+    .map(message => ({ ...message }));
+}
+
+function buildMessages(agent, provider, system) {
+  const hist = cleanHistory(agent.history.slice(-20), provider);
+  if (provider === 'openai') return [{ role: 'system', content: system }, ...hist];
+  return [{ role: 'system', content: system }, ...hist];
+}
+
+function parseToolArguments(raw) {
+  if (raw === undefined || raw === null || raw === '') return {};
+  const parsed = JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw));
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('tool arguments must be an object');
+  return parsed;
+}
 
 export function createAgent({ system, tools, memory, maxRounds = 8, history = [], autoCompact = true, thinkingLevel = 'mid' }) {
   const agent = {
@@ -10,83 +37,81 @@ export function createAgent({ system, tools, memory, maxRounds = 8, history = []
     tools: tools || [],
     memory,
     maxRounds,
-    history: [...history],
+    history: Array.isArray(history) ? [...history] : [],
     autoCompact,
     thinkingLevel: parseThinkingLevel(thinkingLevel),
     thinkingBudget: CONFIG.AGENT_THINKING_BUDGET || 5000,
   };
   agent.say = (text) => say(agent, text);
-  agent.replaceHistory = (h) => { agent.history = h; return h; };
-  agent.compactHistory = async (h) => (h || agent.history).slice(-10);
-  agent.maybeCompact = () => agent.history.length > 40;
-  agent.isAutoCompact = () => autoCompact;
+  agent.replaceHistory = (next) => {
+    if (!Array.isArray(next)) throw new Error('history must be an array');
+    agent.history = [...next];
+    return agent.history;
+  };
+  agent.compactHistory = async (input) => compactHistory(input || agent.history);
+  agent.maybeCompact = () => agent.autoCompact && agent.history.length > 40;
+  agent.isAutoCompact = () => agent.autoCompact;
   return agent;
-}
-
-function buildMessages(agent, provider) {
-  const sys = { role: 'system', content: agent.system };
-  const hist = agent.history.slice(-20);
-  if (provider === 'openai') {
-    return [sys, ...hist];
-  }
-  const clean = hist
-    .filter((m) => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content)
-    .map((m) => ({ role: m.role, content: m.content }));
-  return [sys, ...clean];
 }
 
 export async function say(agent, text) {
   const input = String(text ?? '');
   agent.history.push({ role: 'user', content: input });
-  if (agent.history.length > 40) agent.history = agent.history.slice(-40);
+  if (agent.autoCompact && agent.history.length > 40) agent.history = await agent.compactHistory(agent.history);
 
-  const hasKey = CONFIG.AI_API_KEY || CONFIG.ANTHROPIC_API_KEY || CONFIG.GEMINI_API_KEY;
+  const provider = detectProviders();
+  const hasKey = provider === 'openai'
+    ? Boolean(CONFIG.AI_API_KEY)
+    : provider === 'anthropic'
+      ? Boolean(CONFIG.ANTHROPIC_API_KEY)
+      : Boolean(CONFIG.GEMINI_API_KEY);
   if (!hasKey) {
-    const reply = `AI key set nist — man hanuz be LLM vasl nistam, pas nemitunam javab vaghei bedam.\n\nDar .env yekio por kon:\n- AI_API_KEY (+ AI_BASE_URL, AI_MODEL)\n- ya ANTHROPIC_API_KEY\n- ya GEMINI_API_KEY\n\nBad restart kon (npm start) va dobare bepors.`;
+    const reply = 'AI key set nist — man hanuz be LLM vasl nistam, pas nemitunam javab vaghei bedam.\n\nDar .env yekio por kon:\n- AI_API_KEY (+ AI_BASE_URL, AI_MODEL)\n- ya ANTHROPIC_API_KEY\n- ya GEMINI_API_KEY\n\nBad restart kon (npm start) va dobare bepors.';
     agent.history.push({ role: 'assistant', content: reply });
     return { role: 'assistant', content: reply };
   }
 
-  const provider = detectProviders();
   const useTools = provider === 'openai' && agent.tools.length > 0;
   let finalText = '';
+  const system = await resolveSystem(agent);
 
   try {
     for (let round = 0; round < (agent.maxRounds || 8); round++) {
-      const messages = buildMessages(agent, provider);
-      const res = await withTimeout(chat(messages, provider, useTools ? agent.tools : []), 60000);
+      const messages = buildMessages(agent, provider, system);
+      const res = await withTimeout(signal => chat(messages, provider, useTools ? agent.tools : [], { signal }), 60000);
       if (res.text) finalText = res.text;
-      const toolCalls = res.toolCalls || [];
+      const toolCalls = Array.isArray(res.toolCalls) ? res.toolCalls : [];
       if (!toolCalls.length) break;
 
       if (provider === 'openai') {
         agent.history.push({
           role: 'assistant',
           content: res.text || null,
-          tool_calls: toolCalls.map((tc) => ({ id: tc.id, type: 'function', function: tc.function })),
+          tool_calls: toolCalls.map(call => ({ id: call.id, type: 'function', function: call.function })),
         });
       }
-      for (const tc of toolCalls) {
-        const name = tc.function?.name || tc.name;
-        let args = {};
-        try { args = JSON.parse(tc.function?.arguments || '{}'); } catch {}
-        const tool = agent.tools.find((t) => t.name === name);
+      for (const call of toolCalls) {
+        const name = call.function?.name || call.name;
         let result;
         try {
-          result = tool ? await withTimeout(tool.handler(args), 20000) : { error: `unknown tool: ${name}` };
-        } catch (e) {
-          result = { error: String(e?.message || e) };
+          const args = parseToolArguments(call.function?.arguments);
+          const tool = agent.tools.find(candidate => candidate.name === name);
+          if (!tool) throw new Error(`unknown tool: ${name}`);
+          validateToolArguments(tool.parameters || {}, args);
+          result = await withTimeout(signal => tool.handler(args, { signal }), 20000);
+        } catch (error) {
+          result = { error: error.message || String(error) };
         }
-        const content = JSON.stringify(result).slice(0, 4000);
+        const content = stringifyToolResult(result);
         if (provider === 'openai') {
-          agent.history.push({ role: 'tool', tool_call_id: tc.id, content });
+          agent.history.push({ role: 'tool', tool_call_id: call.id, content });
         } else {
           agent.history.push({ role: 'user', content: `[tool ${name} result]\n${content}` });
         }
       }
     }
-  } catch (e) {
-    finalText = `LLM error: ${e.message}. (AI key/model o check kon — /models ro bebin)`;
+  } catch (error) {
+    finalText = `LLM error: ${error.message}. (AI key/model o check kon — /models ro bebin)`;
   }
 
   if (!finalText) finalText = 'Hichi bar nagasht — dobare bepors.';
@@ -95,12 +120,20 @@ export async function say(agent, text) {
 }
 
 export function replaceHistory(history, newHistory) {
-  return newHistory;
+  if (!Array.isArray(newHistory)) throw new Error('history must be an array');
+  return [...newHistory];
 }
 
 export async function compactHistory(history) {
-  const summary = (history || []).reduce((acc, m) => acc + (typeof m.content === 'string' ? m.content : '').slice(0, 200), '');
-  return summary.slice(0, 1000);
+  const messages = Array.isArray(history) ? history : [];
+  const recent = messages.slice(-10);
+  const older = messages.slice(0, -10);
+  const summary = older
+    .filter(message => message?.role === 'user' || message?.role === 'assistant')
+    .map(message => `${message.role}: ${typeof message.content === 'string' ? message.content.slice(0, 200) : ''}`)
+    .join('\n')
+    .slice(0, 1000);
+  return summary ? [{ role: 'user', content: `Conversation summary:\n${summary}` }, ...recent] : recent;
 }
 
 export function maybeCompact(memory, budget) {

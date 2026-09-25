@@ -1,9 +1,13 @@
-import { BitunixClient } from './client.js';
 import { CONFIG } from '../config.js';
 
 let sharedClient = null;
 
 export function setBitunixClient(c) { sharedClient = c; }
+
+function requireClient() {
+  if (!sharedClient) throw new Error('Client not ready');
+  return sharedClient;
+}
 
 export const bitunixTools = [
   {
@@ -11,7 +15,7 @@ export const bitunixTools = [
     description: 'Get current tickers',
     parameters: { type: 'object', properties: { symbol: { type: 'string' } } },
     async handler({ symbol }) {
-      return sharedClient.getTickers(symbol || CONFIG.symbol);
+      return requireClient().getTickers(symbol || CONFIG.symbol);
     },
   },
   {
@@ -23,7 +27,7 @@ export const bitunixTools = [
       required: ['symbol'],
     },
     async handler({ symbol, interval = '15m', limit = 200 }) {
-      return sharedClient.getKlines(symbol, interval, limit);
+      return requireClient().getKlines(symbol, interval, limit);
     },
   },
   {
@@ -31,7 +35,7 @@ export const bitunixTools = [
     description: 'Get order book depth',
     parameters: { type: 'object', properties: { symbol: { type: 'string' } }, required: ['symbol'] },
     async handler({ symbol }) {
-      return sharedClient.getDepth(symbol);
+      return requireClient().getDepth(symbol);
     },
   },
   {
@@ -39,7 +43,7 @@ export const bitunixTools = [
     description: 'Get account info',
     parameters: { type: 'object', properties: { marginCoin: { type: 'string' } } },
     async handler({ marginCoin = 'USDT' }) {
-      return sharedClient.getAccount(marginCoin);
+      return requireClient().getAccount(marginCoin);
     },
   },
   {
@@ -47,7 +51,7 @@ export const bitunixTools = [
     description: 'Get funding rate',
     parameters: { type: 'object', properties: { symbol: { type: 'string' } } },
     async handler({ symbol = CONFIG.symbol }) {
-      return sharedClient.getFundingRate(symbol);
+      return requireClient().getFundingRate(symbol);
     },
   },
   {
@@ -55,7 +59,7 @@ export const bitunixTools = [
     description: 'Get pending positions',
     parameters: { type: 'object', properties: { symbol: { type: 'string' } } },
     async handler({ symbol }) {
-      return sharedClient.getPendingPositions(symbol);
+      return requireClient().getPendingPositions(symbol);
     },
   },
   {
@@ -63,7 +67,7 @@ export const bitunixTools = [
     description: 'Get history positions',
     parameters: { type: 'object', properties: { symbol: { type: 'string' } } },
     async handler({ symbol }) {
-      return sharedClient.getHistoryPositions(symbol);
+      return requireClient().getHistoryPositions(symbol);
     },
   },
   {
@@ -84,7 +88,7 @@ export const bitunixTools = [
     },
     async handler(params) {
       if (CONFIG.dry_run) return { dry_run: true, params };
-      return sharedClient.placeOrder(params);
+      return requireClient().placeOrder(params);
     },
   },
   {
@@ -93,7 +97,7 @@ export const bitunixTools = [
     parameters: { type: 'object', properties: { symbol: { type: 'string' }, positionId: { type: 'string' }, tpPrice: { type: 'string' }, slPrice: { type: 'string' } } },
     async handler(params) {
       if (CONFIG.dry_run) return { dry_run: true, params };
-      return sharedClient.placeTPSL(params);
+      return requireClient().placeTPSL(params);
     },
   },
   {
@@ -102,7 +106,7 @@ export const bitunixTools = [
     parameters: { type: 'object', properties: { orderId: { type: 'string' } }, required: ['orderId'] },
     async handler({ orderId }) {
       if (CONFIG.dry_run) return { dry_run: true, orderId };
-      return sharedClient.cancelTPSL(orderId);
+      return requireClient().cancelTPSL(orderId);
     },
   },
   {
@@ -110,7 +114,7 @@ export const bitunixTools = [
     description: 'Get pending TP/SL orders',
     parameters: { type: 'object', properties: { symbol: { type: 'string' } } },
     async handler({ symbol }) {
-      return sharedClient.getPendingTPSL(symbol);
+      return requireClient().getPendingTPSL(symbol);
     },
   },
   {
@@ -118,7 +122,7 @@ export const bitunixTools = [
     description: 'Get history TP/SL orders',
     parameters: { type: 'object', properties: { symbol: { type: 'string' } } },
     async handler({ symbol }) {
-      return sharedClient.getHistoryTPSL(symbol);
+      return requireClient().getHistoryTPSL(symbol);
     },
   },
   {
@@ -126,7 +130,8 @@ export const bitunixTools = [
     description: 'Change leverage',
     parameters: { type: 'object', properties: { symbol: { type: 'string' }, leverage: { type: 'number' } }, required: ['symbol', 'leverage'] },
     async handler({ symbol, leverage }) {
-      return sharedClient.changeLeverage(symbol, leverage);
+      if (CONFIG.dry_run) return { dry_run: true, symbol, leverage };
+      return requireClient().changeLeverage(symbol, leverage);
     },
   },
   {
@@ -134,7 +139,8 @@ export const bitunixTools = [
     description: 'Change margin mode (crossed/isolated)',
     parameters: { type: 'object', properties: { symbol: { type: 'string' }, marginMode: { type: 'string' } }, required: ['symbol', 'marginMode'] },
     async handler({ symbol, marginMode }) {
-      return sharedClient.changeMarginMode(symbol, marginMode);
+      if (CONFIG.dry_run) return { dry_run: true, symbol, marginMode };
+      return requireClient().changeMarginMode(symbol, marginMode);
     },
   },
   {
@@ -142,7 +148,8 @@ export const bitunixTools = [
     description: 'Change position mode (ONE_WAY/HEDGE)',
     parameters: { type: 'object', properties: { symbol: { type: 'string' }, positionMode: { type: 'string' } }, required: ['symbol', 'positionMode'] },
     async handler({ symbol, positionMode }) {
-      return sharedClient.changePositionMode(symbol, positionMode);
+      if (CONFIG.dry_run) return { dry_run: true, symbol, positionMode };
+      return requireClient().changePositionMode(symbol, positionMode);
     },
   },
   {
@@ -150,7 +157,8 @@ export const bitunixTools = [
     description: 'Adjust position margin',
     parameters: { type: 'object', properties: { symbol: { type: 'string' }, margin: { type: 'string' } }, required: ['symbol', 'margin'] },
     async handler({ symbol, margin }) {
-      return sharedClient.adjustPositionMargin(symbol, margin);
+      if (CONFIG.dry_run) return { dry_run: true, symbol, margin };
+      return requireClient().adjustPositionMargin(symbol, margin);
     },
   },
   {
@@ -158,7 +166,7 @@ export const bitunixTools = [
     description: 'Get trading pairs list',
     parameters: { type: 'object', properties: {} },
     async handler() {
-      return sharedClient.getTradingPairs();
+      return requireClient().getTradingPairs();
     },
   },
   {
@@ -166,7 +174,7 @@ export const bitunixTools = [
     description: 'Get error code info',
     parameters: { type: 'object', properties: { code: { type: 'string' } } },
     async handler({ code }) {
-      return sharedClient.getErrorCode(code);
+      return requireClient().getErrorCode(code);
     },
   },
   {
@@ -174,7 +182,7 @@ export const bitunixTools = [
     description: 'Get leverage and margin mode',
     parameters: { type: 'object', properties: { symbol: { type: 'string' } } },
     async handler({ symbol }) {
-      return sharedClient.getLeverageAndMarginMode(symbol);
+      return requireClient().getLeverageAndMarginMode(symbol);
     },
   },
   {
@@ -182,7 +190,7 @@ export const bitunixTools = [
     description: 'Get recent trades',
     parameters: { type: 'object', properties: { symbol: { type: 'string' } } },
     async handler({ symbol }) {
-      return sharedClient.getHistoryTrades(symbol);
+      return requireClient().getHistoryTrades(symbol);
     },
   },
   {
@@ -191,7 +199,7 @@ export const bitunixTools = [
     parameters: { type: 'object', properties: { symbol: { type: 'string' } }, required: ['symbol'] },
     async handler({ symbol }) {
       if (CONFIG.dry_run) return { dry_run: true, symbol };
-      return sharedClient.flashClosePosition(symbol);
+      return requireClient().flashClosePosition(symbol);
     },
   },
 ];

@@ -17,7 +17,13 @@ export async function listProviderModels(provider) {
 
 export async function rankModels(provider, freePrefer = true) {
   const models = await listProviderModels(provider);
-  return models;
+  if (!freePrefer) return [...models];
+  const order = {
+    openai: ['gpt-4o-mini', 'gpt-4o', 'gpt-4', 'gpt-3.5-turbo'],
+    anthropic: ['claude-3-haiku-20240307', 'claude-3-5-sonnet-20240620'],
+    google: ['gemini-1.5-flash', 'gemini-1.5-pro'],
+  };
+  return (order[provider] || []).filter(model => models.includes(model));
 }
 
 export function fallbackCandidates(provider) {

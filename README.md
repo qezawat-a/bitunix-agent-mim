@@ -9,26 +9,26 @@ trading engine.
 
 ```bash
 npm install
-cp .env.example .env
+cp env.example .env
 # fill your keys in .env
 npm start
 ```
 
 Default safety: `DRY_RUN=1`. Real Bitunix orders are sent only after you
-explicitly switch with `/dryrun 0` in Telegram or chat.
+explicitly switch with `/dryrun 0` and enable `/autotrade on` in Telegram.
 
 ## Main features
 
 - Bitunix USDT-M futures REST + WebSocket client
-- 8 strategies: EMA trend, RSI momentum, MACD cross, volume confirmation,
-  price momentum, ADX strength, Bollinger, funding-rate
+- 10 strategies: EMA trend, RSI momentum, MACD cross, volume confirmation,
+  price momentum, ADX strength, Bollinger, funding-rate, Super Trend, ATR breakout
 - Multi-timeframe signal gate: min confidence, tf confidence, agreement,
   confirm scans, cooldown
 - Dynamic ATR-based TP/SL, breakeven, trailing, liquidation-distance guard
 - Autonomous agent loop with thinking levels, model auto-refresh, sessions
 - Telegram bot: `/status`, `/start`, `/stop`, `/settings`, `/dryrun`,
   `/autotrade`, `/memory`, `/resume`, `/models`, `/ask`
-- Neon Postgres persistence for trader state + long-term memory
+- Neon Postgres persistence for validated settings and long-term memory
 
 ## Structure
 

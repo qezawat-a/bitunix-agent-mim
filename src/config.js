@@ -2,6 +2,18 @@ import 'dotenv/config';
 
 const S = (v, fallback) => process.env[v] ?? fallback;
 
+export function parseBoolean(value, fallback, name = 'value') {
+  if (value === undefined || value === null || String(value).trim() === '') return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  throw new Error(`${name} must be true/false or 1/0`);
+}
+
+function B(v, fallback, name) {
+  return parseBoolean(v, fallback, name);
+}
+
 export const CONFIG = {
   // LLM
   AI_PROVIDER: S('AI_PROVIDER', 'auto'),
@@ -35,7 +47,7 @@ export const CONFIG = {
   AGENT_NAME: S('AGENT_NAME', 'J-ROCK'),
   AGENT_AUTONOMOUS: Number(S('AGENT_AUTONOMOUS', 0)),
   AGENT_MAX_STEP: Number(S('AGENT_MAX_STEP', 8)),
-  AGENT_THINKING_ENABLED: S('AGENT_THINKING_ENABLED', 'true') === 'true',
+  AGENT_THINKING_ENABLED: B(S('AGENT_THINKING_ENABLED', 'true'), true, 'AGENT_THINKING_ENABLED'),
   AGENT_THINKING_BUDGET: Number(S('AGENT_THINKING_BUDGET', 5000)),
   AGENT_AUTONOMOUS_INTERVAL_SEC: Number(S('AGENT_AUTONOMOUS_INTERVAL_SEC', 15)),
 
@@ -61,14 +73,14 @@ export const CONFIG = {
   trailing_distance_pct: Number(S('trailing_distance_pct', 1)),
   sl_liquidation_safety: Number(S('sl_liquidation_safety', 0.60)),
   on_tpsl_failure: S('on_tpsl_failure', 'cancel'),
-  reversal_enabled: S('reversal_enabled', 'true') === 'true',
+  reversal_enabled: B(S('reversal_enabled', 'true'), true, 'reversal_enabled'),
   reversal_confidence: Number(S('reversal_confidence', 85)),
   report_interval_sec: Number(S('report_interval_sec', 30)),
   mid_manage_interval_sec: Number(S('mid_manage_interval_sec', 15)),
   order_unit: S('order_unit', 'cost'),
   position_sizing_margin_pct: Number(S('position_sizing_margin_pct', 2)),
-  dry_run: S('DRY_RUN', '1') === '1',
-  auto_trade: S('AUTO_TRADE', '0') === '1',
+  dry_run: B(S('DRY_RUN', '1'), true, 'DRY_RUN'),
+  auto_trade: B(S('AUTO_TRADE', '0'), false, 'AUTO_TRADE'),
   store_id: S('STORE_ID', 'j-rock-1'),
 };
 

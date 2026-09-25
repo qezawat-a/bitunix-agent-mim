@@ -1,5 +1,11 @@
 import { CONFIG } from '../config.js';
 
+let sharedMemory = null;
+
+export function setBasicMemory(memory) {
+  sharedMemory = memory;
+}
+
 export const basicTools = [
   {
     name: 'agent_help',
@@ -47,7 +53,8 @@ export const basicTools = [
     description: 'Stop agent execution',
     parameters: { type: 'object', properties: {} },
     async handler() {
-      return { ok: true, stopped: new Date().toISOString() };
+      CONFIG.auto_trade = false;
+      return { ok: true, stopped: new Date().toISOString(), auto_trade: false };
     },
   },
   {
@@ -86,11 +93,12 @@ export const basicTools = [
       },
     },
     async handler({ key, value }) {
+      if (!sharedMemory) return { ok: false, message: 'memory is not ready' };
       if (value !== undefined) {
+        await sharedMemory.remember(key, value);
         return { ok: true, key, value };
       }
-      // dummy return
-      return { ok: false, message: 'provide value' };
+      return { ok: true, key, value: await sharedMemory.recall(key) };
     },
   },
   {

@@ -1,24 +1,34 @@
 import { CONFIG } from '../config.js';
 
+function positiveNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0;
+}
+
 export function computeQty({ available, price, leverage }) {
-  if (!available || !price) return 0;
-  const notional = (available * CONFIG.margin_amount_pct) / 100;
-  const size = (notional / price) * (leverage || CONFIG.leverage);
-  return Math.max(0, Math.floor(size * 10000) / 10000);
+  if (!positiveNumber(available) || !positiveNumber(price)) return 0;
+  const selectedLeverage = Number.isInteger(leverage) ? leverage : CONFIG.leverage;
+  if (!Number.isInteger(selectedLeverage) || selectedLeverage < 1 || selectedLeverage > 125) return 0;
+  const notional = Number(available) * Number(CONFIG.margin_amount_pct) / 100;
+  const size = notional / Number(price) * selectedLeverage;
+  return Number.isFinite(size) && size > 0 ? Math.floor(size * 10000) / 10000 : 0;
 }
 
 export function liqDistanceOk({ markPrice, liqPrice }) {
-  if (!markPrice || !liqPrice) return true;
-  const dist = Math.abs(markPrice - liqPrice) / markPrice;
-  const min = (CONFIG.sl_liquidation_safety || 0.6) / 100;
-  return dist >= min;
+  if (!positiveNumber(markPrice) || !positiveNumber(liqPrice)) return false;
+  const distance = Math.abs(Number(markPrice) - Number(liqPrice)) / Number(markPrice);
+  const minimum = Number(CONFIG.sl_liquidation_safety) / 100;
+  return Number.isFinite(distance) && Number.isFinite(minimum) && distance >= minimum;
 }
 
 export function positionAllowed({ openCount }) {
-  return (openCount || 0) < (CONFIG.max_positions || 3);
+  const count = Number(openCount);
+  const maximum = Number(CONFIG.max_positions);
+  return Number.isInteger(count) && count >= 0 && Number.isInteger(maximum) && maximum > 0 && count < maximum;
 }
 
 export function marginOk({ available, requiredMargin }) {
-  if (!requiredMargin) return true;
-  return (available || 0) >= requiredMargin;
+  const availableValue = Number(available);
+  const requiredValue = Number(requiredMargin);
+  return Number.isFinite(availableValue) && Number.isFinite(requiredValue) && requiredValue >= 0 && availableValue >= requiredValue;
 }

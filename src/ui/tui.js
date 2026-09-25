@@ -1,5 +1,6 @@
 import readline from 'readline';
 import { CONFIG } from '../config.js';
+import { applySettings, getTraderSettings, parseSettingValue } from '../trader/settings.js';
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: 'j-rock> ' });
 
@@ -11,14 +12,21 @@ rl.on('line', async (line) => {
   const t = line.trim();
   if (t === '/quit' || t === '/exit') { rl.close(); return; }
   if (t === '/tsettings' || t === '/settings') {
-    for (const [k, v] of Object.entries(CONFIG)) console.log(`${k} = ${Array.isArray(v) ? v.join(',') : v}`);
+    for (const [k, v] of Object.entries(getTraderSettings(CONFIG))) console.log(`${k} = ${Array.isArray(v) ? v.join(',') : v}`);
   } else if (t.startsWith('/tset ')) {
     const [, k, ...vp] = t.split(/\s+/);
-    CONFIG[k] = vp.join(' ');
-    console.log(`set ${k} = ${CONFIG[k]}`);
+    try {
+      if (k === 'symbol') throw new Error('symbol changes require an active exchange session');
+      const value = parseSettingValue(k, vp.join(' '));
+      applySettings(CONFIG, { [k]: value });
+      console.log(`set ${k} = ${value}`);
+    } catch (error) {
+      console.log(error.message);
+    }
   } else if (t.startsWith('/tget ')) {
     const k = t.split(/\s+/)[1];
-    console.log(`${k} = ${CONFIG[k]}`);
+    const settings = getTraderSettings(CONFIG);
+    console.log(Object.hasOwn(settings, k) ? `${k} = ${settings[k]}` : 'unknown setting');
   } else if (t === '/treset') {
     console.log('settings reset requested (restart to apply defaults)');
   } else if (t === '/tstatus') {
