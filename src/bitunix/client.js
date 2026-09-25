@@ -34,7 +34,7 @@ export class BitunixClient {
   static sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
 
   makeSign(path, body, queryParams = {}) {
-    const nonce = crypto.randomBytes(8).readBigUInt64BE().toString();
+    const nonce = crypto.randomBytes(16).toString('hex');
     const timestamp = Date.now().toString();
     const qs = canonicalQuery(queryParams);
     const bodyStr = body ? JSON.stringify(body).replace(/\s/g, '') : '';
