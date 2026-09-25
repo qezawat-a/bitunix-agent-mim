@@ -21,6 +21,11 @@ function validateOrder(params) {
   }
 }
 
+export function canonicalQuery(queryParams = {}) {
+  const clean = Object.fromEntries(Object.entries(queryParams).filter(([, value]) => value !== '' && value !== undefined && value !== null));
+  return Object.keys(clean).sort().map(key => `${key}${clean[key]}`).join('');
+}
+
 export class BitunixClient {
   baseURL = CONFIG.BITUNIX_BASE_URL;
   apiKey = CONFIG.BITUNIX_API_KEY;
@@ -31,13 +36,7 @@ export class BitunixClient {
   makeSign(path, body, queryParams = {}) {
     const nonce = crypto.randomBytes(8).readBigUInt64BE().toString();
     const timestamp = Date.now().toString();
-    const cleanParams = Object.fromEntries(
-      Object.entries(queryParams).filter(([, v]) => v !== '' && v !== undefined && v !== null)
-    );
-    const qs = Object.keys(cleanParams)
-      .sort()
-      .map(k => `${k}=${cleanParams[k]}`)
-      .join('');
+    const qs = canonicalQuery(queryParams);
     const bodyStr = body ? JSON.stringify(body).replace(/\s/g, '') : '';
     const digestInput = `${nonce}${timestamp}${this.apiKey}${qs}${bodyStr}`;
     const digest = BitunixClient.sha256(digestInput);
