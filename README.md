@@ -22,7 +22,7 @@ explicitly switch with `/dryrun 0` and enable `/autotrade on` in Telegram.
 - Bitunix USDT-M futures REST + WebSocket client
 - 10 strategies: EMA trend, RSI momentum, MACD cross, volume confirmation,
   price momentum, ADX strength, Bollinger, funding-rate, Super Trend, ATR breakout
-- Multi-timeframe signal gate: min confidence, tf confidence, agreement,
+- Multi-timeframe signal gate (`1m`, `3m`, `5m`, `15m`, `1h`): min confidence, tf confidence, agreement,
   confirm scans, cooldown
 - Dynamic ATR-based TP/SL, breakeven, trailing, liquidation-distance guard
 - Autonomous agent loop with thinking levels, model auto-refresh, sessions

@@ -177,6 +177,26 @@ describe('exchange safety', () => {
     await assert.rejects(() => client.request('POST', '/test', { a: 1 }), /rejected/);
   });
 
+  it('uses official Bitunix position close and TP/SL contracts', async () => {
+    const requests = [];
+    globalThis.fetch = async (url, options) => {
+      requests.push({ url, body: options.body ? JSON.parse(options.body) : null });
+      return { ok: true, json: async () => ({ code: 0, data: { orderId: 'x' } }) };
+    };
+    const client = new BitunixClient();
+    await client.closePosition('BTCUSDT', 'p1', { symbol: 'BTCUSDT', positionId: 'p1', side: 'LONG', qty: '2' });
+    await client.placeTPSL({ symbol: 'BTCUSDT', positionId: 'p1', tpPrice: '110', slPrice: '90' });
+    await client.getLeverageAndMarginMode('BTCUSDT');
+    await client.getPositionMode();
+    assert.match(requests[0].url, /trade\/place_order/);
+    assert.equal(requests[0].body.side, 'BUY');
+    assert.equal(requests[0].body.tradeSide, 'CLOSE');
+    assert.match(requests[1].url, /tpsl\/position\/place_order/);
+    assert.equal(Object.hasOwn(requests[1].body, 'tpOrderType'), false);
+    assert.match(requests[2].url, /account\/get_leverage_margin_mode\?symbol=BTCUSDT&marginCoin=USDT/);
+    assert.match(requests[3].url, /account\/position_mode/);
+  });
+
   it('does not substitute a different margin coin', async () => {
     const client = new BitunixClient();
     globalThis.fetch = async () => ({ ok: true, json: async () => ({ code: 0, data: [{ marginCoin: 'USDC', available: '10' }] }) });
@@ -184,7 +204,9 @@ describe('exchange safety', () => {
   });
 
   it('fails closed when liquidation data is missing', () => {
-    assert.equal(liqDistanceOk({ markPrice: 100, liqPrice: 0 }), false);
+    assert.equal(liqDistanceOk({ markPrice: 100, liqPrice: undefined }), false);
+    assert.equal(liqDistanceOk({ markPrice: 0, liqPrice: 50 }), false);
+    assert.equal(liqDistanceOk({ markPrice: 100, liqPrice: 0 }), true);
     assert.equal(liqDistanceOk({ markPrice: 100, liqPrice: 50 }), true);
   });
 
@@ -210,6 +232,21 @@ describe('exchange safety', () => {
     const result = await trader.scanAndOpen();
     assert.equal(result.executed, false);
     assert.equal(calls.length, 0);
+  });
+
+  it('reconciles an order after an ambiguous write failure', async () => {
+    let submitted;
+    const client = {
+      getAccount: async () => ({ available: '100' }),
+      placeOrder: async body => { submitted = body; throw Object.assign(new Error('timeout'), { executionUnknown: true }); },
+      getPendingOrders: async () => [{ clientId: submitted.clientId, orderId: 'o1', status: 'FILLED' }],
+      getHistoryOrders: async () => [],
+      getPendingPositions: async () => [],
+    };
+    const trader = new Trader(client);
+    Object.assign(CONFIG, { auto_trade: true, dry_run: false, leverage: 10, margin_amount_pct: 2, cooldown_minutes: 5 });
+    const result = await trader.openPosition('BTCUSDT', 100, 'bullish');
+    assert.equal(result.orderId, 'o1');
   });
 
   it('rechecks auto-trade immediately before order submission', async () => {
@@ -262,15 +299,34 @@ describe('exchange safety', () => {
   it('verifies exchange account settings before live trading', async () => {
     const trader = new Trader({
       getAccount: async () => ({ positionMode: 'HEDGE' }),
-      getLeverageAndMarginMode: async () => ({ leverage: CONFIG.leverage }),
+      getLeverageAndMarginMode: async () => ({ leverage: CONFIG.leverage, marginMode: 'CROSS' }),
+      getPositionMode: async () => ({ positionMode: 'HEDGE' }),
     });
     CONFIG.dry_run = false;
     await trader.verifyAccountSettings();
     const mismatched = new Trader({
       getAccount: async () => ({ positionMode: 'HEDGE' }),
-      getLeverageAndMarginMode: async () => ({ leverage: CONFIG.leverage + 1 }),
+      getLeverageAndMarginMode: async () => ({ leverage: CONFIG.leverage + 1, marginMode: 'CROSS' }),
+      getPositionMode: async () => ({ positionMode: 'HEDGE' }),
     });
     await assert.rejects(() => mismatched.verifyAccountSettings(), /does not match/);
+  });
+
+  it('does not apply account settings while exposure is open', async () => {
+    let changed = 0;
+    const client = {
+      getPendingPositions: async () => [fakePosition()],
+      getPendingOrders: async () => [],
+      getAccount: async () => ({ positionMode: 'HEDGE' }),
+      getLeverageAndMarginMode: async () => ({ leverage: CONFIG.leverage, marginMode: 'CROSS' }),
+      getPositionMode: async () => ({ positionMode: 'HEDGE' }),
+      changeLeverage: async () => { changed++; },
+    };
+    const trader = new Trader(client);
+    CONFIG.dry_run = false;
+    const result = await trader.syncAccountSettings({ apply: true });
+    assert.equal(result.skipped, 'open_exposure');
+    assert.equal(changed, 0);
   });
 
   it('places missing TP/SL protection after a fill', async () => {
@@ -294,6 +350,15 @@ describe('exchange safety', () => {
     const result = await pm.checkLiquidationGuard(fakePosition({ markPrice: '100', liqPrice: '99.5' }));
     assert.equal(result.dryRun, true);
     assert.equal(calls.length, 0);
+  });
+
+  it('normalizes documented LONG positions for management', async () => {
+    const client = { getPendingPositions: async () => [{ symbol: 'BTCUSDT', positionId: 'p1', side: 'LONG', qty: '1', avgOpenPrice: '100', liqPrice: '50' }], getTickers: async () => [{ lastPrice: '101' }] };
+    const pm = new PositionManager(client, 'BTCUSDT', { ...getTraderSettings(CONFIG), symbol: 'BTCUSDT' });
+    const positions = await pm.fetchPositions();
+    assert.equal(positions[0].side, 'BUY');
+    assert.equal(positions[0].avgPrice, '100');
+    assert.equal(positions[0].markPrice, 101);
   });
 
   it('uses the configured symbol for position reads', async () => {

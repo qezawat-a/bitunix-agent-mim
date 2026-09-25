@@ -58,12 +58,18 @@ export class BitunixClient {
     const url = `${this.baseURL}${path}${query ? `?${query}` : ''}`;
     const timeoutMs = options.timeoutMs ?? 15000;
     const signal = options.signal ?? AbortSignal.timeout(timeoutMs);
-    const res = await fetch(url, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-      signal,
-    });
+    let res;
+    try {
+      res = await fetch(url, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+        signal,
+      });
+    } catch (error) {
+      if (method !== 'GET') error.executionUnknown = true;
+      throw error;
+    }
     if (!res.ok) {
       const txt = await res.text();
       throw new Error(`Bitunix ${method} ${path} ${res.status}: ${txt}`);
@@ -127,17 +133,19 @@ export class BitunixClient {
     const quantity = target.size ?? target.qty ?? target.positionQty ?? target.positionSize;
     if (!positiveNumber(quantity)) throw new Error(`position ${positionId} has no valid size`);
     const positionSide = String(target.side || '').toUpperCase();
-    if (!['BUY', 'SELL'].includes(positionSide)) throw new Error(`position ${positionId} has an invalid side`);
-    const side = positionSide === 'BUY' ? 'SELL' : 'BUY';
+    const side = positionSide === 'LONG' || positionSide === 'BUY'
+      ? 'BUY'
+      : positionSide === 'SHORT' || positionSide === 'SELL' ? 'SELL' : null;
+    if (!side) throw new Error(`position ${positionId} has an invalid side`);
     return this.placeOrder({
       symbol,
       side,
       qty: String(quantity),
       orderType: 'MARKET',
-      effect: 'GTC',
       tradeSide: 'CLOSE',
       reduceOnly: true,
       positionId,
+      clientId: `jrock-close-${positionId}`,
     });
   }
 
@@ -146,15 +154,16 @@ export class BitunixClient {
   }
 
   async placeTPSL(params) {
-    return this.request('POST', '/api/v1/futures/tp_sl/place_tp_sl_order', params, {});
+    return this.request('POST', '/api/v1/futures/tpsl/position/place_order', params, {});
   }
 
   async modifyTPSL(params) {
-    return this.request('POST', '/api/v1/futures/tp_sl/modify_tp_sl_order', params, {});
+    return this.request('POST', '/api/v1/futures/tpsl/position/modify_order', params, {});
   }
 
-  async cancelTPSL(orderId) {
-    return this.request('POST', '/api/v1/futures/tp_sl/cancel_tp_sl_order', { orderId }, {});
+  async cancelTPSL(symbol, orderId) {
+    if (!symbol || !orderId) throw new Error('symbol and orderId are required to cancel TP/SL');
+    return this.request('POST', '/api/v1/futures/tpsl/cancel_order', { symbol, orderId }, {});
   }
 
   async getPendingPositions(symbol) {
@@ -166,27 +175,28 @@ export class BitunixClient {
   }
 
   async getPendingTPSL(symbol) {
-    return this.request('GET', '/api/v1/futures/tp_sl/get_pending_tp_sl_order', null, { symbol });
+    return this.request('GET', '/api/v1/futures/tpsl/get_pending_orders', null, { symbol });
   }
 
   async getHistoryTPSL(symbol) {
-    return this.request('GET', '/api/v1/futures/tp_sl/get_history_tp_sl_order', null, { symbol });
+    return this.request('GET', '/api/v1/futures/tpsl/get_history_orders', null, { symbol });
   }
 
   async changeLeverage(symbol, leverage) {
     if (!Number.isInteger(leverage) || leverage < 1 || leverage > 125) throw new Error('leverage must be an integer 1-125');
-    return this.request('POST', '/api/v1/futures/account/change_leverage', { symbol, leverage }, {});
+    return this.request('POST', '/api/v1/futures/account/change_leverage', { symbol, leverage, marginCoin: 'USDT' }, {});
   }
 
   async changeMarginMode(symbol, marginMode) {
-    if (!['crossed', 'isolated'].includes(marginMode)) throw new Error('marginMode must be crossed or isolated');
-    return this.request('POST', '/api/v1/futures/account/change_margin_mode', { symbol, marginMode }, {});
+    const normalized = { crossed: 'CROSS', isolated: 'ISOLATION', cross: 'CROSS', isolation: 'ISOLATION' }[String(marginMode).toLowerCase()];
+    if (!normalized) throw new Error('marginMode must be crossed or isolated');
+    return this.request('POST', '/api/v1/futures/account/change_margin_mode', { symbol, marginMode: normalized, marginCoin: 'USDT' }, {});
   }
 
-  async changePositionMode(symbol, positionMode) {
-    const normalized = { 'one-way': 'ONE_WAY', one_way: 'ONE_WAY', hedge: 'HEDGE' }[positionMode];
+  async changePositionMode(positionMode) {
+    const normalized = { 'one-way': 'ONE_WAY', one_way: 'ONE_WAY', hedge: 'HEDGE' }[String(positionMode).toLowerCase()];
     if (!normalized) throw new Error('positionMode must be one-way or hedge');
-    return this.request('POST', '/api/v1/futures/account/change_position_mode', { symbol, positionMode: normalized }, {});
+    return this.request('POST', '/api/v1/futures/account/change_position_mode', { positionMode: normalized }, {});
   }
 
   async adjustPositionMargin(symbol, margin) {
@@ -206,12 +216,21 @@ export class BitunixClient {
     return this.request('GET', '/api/v1/futures/market/trading_pairs', null, {});
   }
 
-  async getLeverageAndMarginMode(symbol) {
-    return this.request('GET', '/api/v1/futures/account/leverage_and_margin_mode', null, { symbol });
+  async getLeverageAndMarginMode(symbol, marginCoin = 'USDT') {
+    return this.request('GET', '/api/v1/futures/account/get_leverage_margin_mode', null, { symbol, marginCoin });
+  }
+
+  async getPositionMode() {
+    return this.request('GET', '/api/v1/futures/account/position_mode', null, {});
   }
 
   async getPendingOrders(symbol) {
     return this.request('GET', '/api/v1/futures/trade/get_pending_orders', null, { symbol });
+  }
+
+  async getOrderDetail(symbol, orderId) {
+    if (!symbol || !orderId) throw new Error('symbol and orderId are required');
+    return this.request('GET', '/api/v1/futures/trade/get_order_detail', null, { symbol, orderId });
   }
 
   async getHistoryOrders(symbol) {

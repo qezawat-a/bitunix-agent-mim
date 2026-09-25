@@ -19,6 +19,7 @@ export class Trader {
     cooldownUntil: 0,
     orderUnknownUntil: 0,
     positions: [],
+    lastPrivateEvent: null,
     confirmations: new Map(),
   };
   entryInFlight = new Set();
@@ -58,21 +59,54 @@ export class Trader {
 
   async verifyAccountSettings() {
     if (CONFIG.dry_run) return { skipped: 'dry_run' };
-    const [account, leverageData] = await Promise.all([
+    const [account, leverageData, positionModeData] = await Promise.all([
       this.client.getAccount('USDT'),
       this.client.getLeverageAndMarginMode(CONFIG.symbol),
+      this.client.getPositionMode(),
     ]);
     const leverageRecord = Array.isArray(leverageData) ? leverageData[0] : leverageData;
     const leverageValue = Number(leverageRecord?.leverage ?? leverageRecord?.marginLeverage);
     if (Number.isFinite(leverageValue) && leverageValue !== CONFIG.leverage) {
       throw new Error(`exchange leverage ${leverageValue} does not match configured leverage ${CONFIG.leverage}`);
     }
-    const exchangeMode = String(account?.positionMode ?? account?.position_mode ?? '').toUpperCase();
+    const exchangeMode = String(positionModeData?.positionMode ?? account?.positionMode ?? account?.position_mode ?? '').toUpperCase();
     const configuredMode = CONFIG.position_mode === 'hedge' ? 'HEDGE' : 'ONE_WAY';
     if (exchangeMode && exchangeMode !== configuredMode) {
       throw new Error(`exchange position mode ${exchangeMode} does not match configured mode ${configuredMode}`);
     }
-    return { checked: true, leverage: Number.isFinite(leverageValue) ? leverageValue : null, positionMode: exchangeMode || null };
+    const exchangeMarginMode = String(leverageRecord?.marginMode ?? '').toUpperCase();
+    const configuredMarginMode = CONFIG.position_type === 'isolated' ? 'ISOLATION' : 'CROSS';
+    if (exchangeMarginMode && exchangeMarginMode !== configuredMarginMode) {
+      throw new Error(`exchange margin mode ${exchangeMarginMode} does not match configured mode ${configuredMarginMode}`);
+    }
+    return { checked: true, leverage: Number.isFinite(leverageValue) ? leverageValue : null, positionMode: exchangeMode || null, marginMode: exchangeMarginMode || null };
+  }
+
+  async syncAccountSettings({ apply = false } = {}) {
+    if (CONFIG.dry_run) return { skipped: 'dry_run' };
+    const [positions, orders] = await Promise.all([
+      this.client.getPendingPositions(CONFIG.symbol),
+      this.client.getPendingOrders(CONFIG.symbol),
+    ]);
+    if (!Array.isArray(positions) || !Array.isArray(orders)) throw new Error('exchange exposure state is invalid');
+    const current = await this.verifyAccountSettings();
+    if (!apply) return { ...current, applied: false };
+    if (positions.length || orders.length) return { ...current, applied: false, skipped: 'open_exposure' };
+
+    const [leverageData, positionModeData] = await Promise.all([
+      this.client.getLeverageAndMarginMode(CONFIG.symbol),
+      this.client.getPositionMode(),
+    ]);
+    const leverageRecord = Array.isArray(leverageData) ? leverageData[0] : leverageData;
+    const leverage = Number(leverageRecord?.leverage);
+    if (Number.isFinite(leverage) && leverage !== CONFIG.leverage) await this.client.changeLeverage(CONFIG.symbol, CONFIG.leverage);
+    const marginMode = String(leverageRecord?.marginMode || '').toUpperCase();
+    const configuredMarginMode = CONFIG.position_type === 'isolated' ? 'ISOLATION' : 'CROSS';
+    if (marginMode && marginMode !== configuredMarginMode) await this.client.changeMarginMode(CONFIG.symbol, CONFIG.position_type);
+    const exchangeMode = String(positionModeData?.positionMode || '').toUpperCase();
+    const configuredMode = CONFIG.position_mode === 'hedge' ? 'HEDGE' : 'ONE_WAY';
+    if (exchangeMode && exchangeMode !== configuredMode) await this.client.changePositionMode(CONFIG.position_mode);
+    return { ...(await this.verifyAccountSettings()), applied: true };
   }
 
   async scanAndOpen() {
@@ -117,6 +151,20 @@ export class Trader {
     }
   }
 
+  async reconcileOrder(symbol, clientId) {
+    if (typeof this.client.getPendingOrders !== 'function' || typeof this.client.getHistoryOrders !== 'function') return null;
+    const results = await Promise.allSettled([
+      this.client.getPendingOrders(symbol),
+      this.client.getHistoryOrders(symbol),
+    ]);
+    for (const result of results) {
+      if (result.status !== 'fulfilled' || !Array.isArray(result.value)) continue;
+      const match = result.value.find(order => String(order.clientId || order.client_id || '') === clientId);
+      if (match) return match;
+    }
+    return null;
+  }
+
   async openPosition(symbol, entryPrice, direction, atr = null) {
     if (!CONFIG.auto_trade) throw new Error('auto_trade is disabled');
     if (!['bullish', 'bearish'].includes(direction)) throw new Error('invalid trade direction');
@@ -125,6 +173,7 @@ export class Trader {
     this.state.confirmations.delete(symbol);
 
     const qty = await this.computePositionSize(entryPrice);
+    const clientId = `jrock-open-${symbol}-${Date.now()}`;
     const levels = this.positionManager.computeTPSL(entryPrice, direction, atr, CONFIG.min_confidence);
     const body = {
       symbol,
@@ -138,6 +187,7 @@ export class Trader {
       slOrderType: 'MARKET',
       reduceOnly: false,
       tradeSide: 'OPEN',
+      clientId,
     };
 
     if (!CONFIG.auto_trade) throw new Error('auto_trade was disabled before order submission');
@@ -147,8 +197,12 @@ export class Trader {
     try {
       order = await this.client.placeOrder(body);
     } catch (error) {
-      this.state.orderUnknownUntil = Date.now() + Math.max(Number(CONFIG.cooldown_minutes) * 60000, 300000);
-      throw error;
+      const reconciled = await this.reconcileOrder(symbol, clientId);
+      if (!reconciled) {
+        this.state.orderUnknownUntil = Date.now() + Math.max(Number(CONFIG.cooldown_minutes) * 60000, 300000);
+        throw error;
+      }
+      order = reconciled;
     }
     const positions = await this.reconcilePositions();
     try {
@@ -217,7 +271,27 @@ export class Trader {
     }
   }
 
-  async handlePrivateEvent() {
+  async handlePrivateEvent(event) {
+    const channel = event?.ch;
+    const data = event?.data;
+    this.state.lastPrivateEvent = { channel: channel || null, event: data?.event || null, at: Date.now() };
+    if (channel === 'position' && data) {
+      const positionId = String(data.positionId || '');
+      if (positionId) {
+        this.state.positions = this.state.positions.filter(position => String(position.positionId) !== positionId);
+        if (data.event !== 'CLOSE') {
+          this.state.positions.push({
+            positionId,
+            symbol: data.symbol,
+            side: data.side === 'LONG' ? 'BUY' : data.side === 'SHORT' ? 'SELL' : data.side,
+            qty: data.qty,
+            openedAt: data.ctime ? Date.parse(data.ctime) || Date.now() : Date.now(),
+          });
+        }
+      }
+    }
+    if (channel === 'tpsl' && data?.status === 'FAILED') console.error('TP/SL private event failed:', data.positionId || data.orderId || 'unknown');
+    if (!['order', 'position', 'tpsl'].includes(channel)) return null;
     if (this.privateRefreshInFlight) return this.privateRefreshInFlight;
     this.privateRefreshInFlight = this.reconcilePositions();
     try {

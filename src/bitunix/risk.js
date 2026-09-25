@@ -15,8 +15,11 @@ export function computeQty({ available, price, leverage }) {
 }
 
 export function liqDistanceOk({ markPrice, liqPrice }) {
-  if (!positiveNumber(markPrice) || !positiveNumber(liqPrice)) return false;
-  const distance = Math.abs(Number(markPrice) - Number(liqPrice)) / Number(markPrice);
+  if (!positiveNumber(markPrice)) return false;
+  if (liqPrice === undefined || liqPrice === null || liqPrice === '') return false;
+  const liquidation = Number(liqPrice);
+  if (!Number.isFinite(liquidation) || liquidation <= 0) return true;
+  const distance = Math.abs(Number(markPrice) - liquidation) / Number(markPrice);
   const minimum = Number(CONFIG.sl_liquidation_safety) / 100;
   return Number.isFinite(distance) && Number.isFinite(minimum) && distance >= minimum;
 }

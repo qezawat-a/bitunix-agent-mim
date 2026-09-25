@@ -72,7 +72,7 @@ async function main() {
 
   if (!CONFIG.dry_run && CONFIG.BITUNIX_API_KEY) {
     try {
-      await trader.verifyAccountSettings();
+      await trader.syncAccountSettings({ apply: CONFIG.auto_trade });
     } catch (error) {
       CONFIG.auto_trade = false;
       scanState.scanOn = false;
@@ -82,7 +82,7 @@ async function main() {
 
   const ws = new BitunixWs({
     onPublic: () => {},
-    onPrivate: () => { trader.handlePrivateEvent().catch(error => console.error('private state refresh error:', error.message)); },
+    onPrivate: event => { trader.handlePrivateEvent(event).catch(error => console.error('private state refresh error:', error.message)); },
   });
   try { ws.connectPublic(['tickers']); } catch {}
   if (CONFIG.BITUNIX_API_KEY) {

@@ -24,6 +24,18 @@ export class PositionManager {
     return this.settings.symbol;
   }
 
+  async fetchMarkPrice(symbol) {
+    if (typeof this.client.getTickers !== 'function') return null;
+    try {
+      const data = await this.client.getTickers(symbol);
+      const ticker = Array.isArray(data) ? data[0] : data;
+      const value = Number(ticker?.markPrice ?? ticker?.lastPrice ?? ticker?.price);
+      return Number.isFinite(value) && value > 0 ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
   async fetchPositions() {
     if (this.fetchInFlight) return this.fetchInFlight;
     const symbol = this.symbol;
@@ -31,7 +43,22 @@ export class PositionManager {
       const data = await this.client.getPendingPositions(symbol);
       if (!Array.isArray(data)) throw new Error('Bitunix positions response must be an array');
       if (symbol !== this.symbol) throw new Error('symbol changed while positions were being fetched');
-      this.state.positions = data.filter(position => String(position.symbol || '').toUpperCase() === String(symbol).toUpperCase());
+      const normalized = data
+        .filter(position => String(position.symbol || '').toUpperCase() === String(symbol).toUpperCase())
+        .map(position => ({
+          ...position,
+          avgPrice: position.avgPrice ?? position.avgOpenPrice,
+          openTime: position.openTime ?? position.ctime,
+          side: position.side === 'LONG' ? 'BUY' : position.side === 'SHORT' ? 'SELL' : position.side,
+          markPrice: position.markPrice ?? position.lastPrice,
+        }));
+      if (normalized.some(position => !finitePositive(position.markPrice))) {
+        const markPrice = await this.fetchMarkPrice(symbol);
+        if (markPrice) for (const position of normalized) {
+          if (!finitePositive(position.markPrice)) position.markPrice = markPrice;
+        }
+      }
+      this.state.positions = normalized;
       return this.state.positions;
     })();
     try {
@@ -78,8 +105,6 @@ export class PositionManager {
       symbol: this.symbol,
       positionId,
       ...levels,
-      tpOrderType: 'MARKET',
-      slOrderType: 'MARKET',
     });
   }
 
@@ -157,7 +182,9 @@ export class PositionManager {
   async checkLiquidationGuard(position) {
     const mark = Number(position.markPrice);
     const liq = Number(position.liqPrice);
-    if (!finitePositive(mark) || !finitePositive(liq)) throw new Error('liquidation guard requires mark and liquidation prices');
+    if (!finitePositive(mark)) throw new Error('liquidation guard requires a mark price');
+    if (position.liqPrice === undefined || position.liqPrice === null || position.liqPrice === '') throw new Error('liquidation guard requires a liquidation price');
+    if (!Number.isFinite(liq) || liq <= 0) return { skipped: 'no active liquidation price' };
     const distance = Math.abs(mark - liq) / mark;
     if (distance >= Number(this.settings.sl_liquidation_safety) / 100) return { skipped: 'liquidation distance safe' };
     this.state.cooldownUntil = Date.now() + Number(this.settings.cooldown_minutes) * 60000;

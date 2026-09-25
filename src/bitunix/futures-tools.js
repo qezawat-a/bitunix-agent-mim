@@ -103,10 +103,10 @@ export const bitunixTools = [
   {
     name: 'bitunix_cancel_tpsl',
     description: 'Cancel TP/SL order',
-    parameters: { type: 'object', properties: { orderId: { type: 'string' } }, required: ['orderId'] },
-    async handler({ orderId }) {
-      if (CONFIG.dry_run) return { dry_run: true, orderId };
-      return requireClient().cancelTPSL(orderId);
+    parameters: { type: 'object', properties: { symbol: { type: 'string' }, orderId: { type: 'string' } }, required: ['symbol', 'orderId'] },
+    async handler({ symbol, orderId }) {
+      if (CONFIG.dry_run) return { dry_run: true, symbol, orderId };
+      return requireClient().cancelTPSL(symbol, orderId);
     },
   },
   {
@@ -146,10 +146,10 @@ export const bitunixTools = [
   {
     name: 'bitunix_change_position_mode',
     description: 'Change position mode (ONE_WAY/HEDGE)',
-    parameters: { type: 'object', properties: { symbol: { type: 'string' }, positionMode: { type: 'string' } }, required: ['symbol', 'positionMode'] },
-    async handler({ symbol, positionMode }) {
-      if (CONFIG.dry_run) return { dry_run: true, symbol, positionMode };
-      return requireClient().changePositionMode(symbol, positionMode);
+    parameters: { type: 'object', properties: { positionMode: { type: 'string' } }, required: ['positionMode'] },
+    async handler({ positionMode }) {
+      if (CONFIG.dry_run) return { dry_run: true, positionMode };
+      return requireClient().changePositionMode(positionMode);
     },
   },
   {
@@ -159,6 +159,14 @@ export const bitunixTools = [
     async handler({ symbol, margin }) {
       if (CONFIG.dry_run) return { dry_run: true, symbol, margin };
       return requireClient().adjustPositionMargin(symbol, margin);
+    },
+  },
+  {
+    name: 'bitunix_get_position_mode',
+    description: 'Get current account position mode',
+    parameters: { type: 'object', properties: {} },
+    async handler() {
+      return requireClient().getPositionMode();
     },
   },
   {
