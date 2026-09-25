@@ -407,6 +407,19 @@ describe('tool safety', () => {
 });
 
 describe('provider and websocket safety', () => {
+  it('auto-selects a discovered model without a hardcoded fallback', async () => {
+    Object.assign(CONFIG, { AI_PROVIDER: 'openai', AI_BASE_URL: 'https://auto-provider.test/v1', AI_API_KEY: 'test-key', AI_MODEL: 'AUTO' });
+    const requests = [];
+    globalThis.fetch = async (url, options) => {
+      requests.push({ url, body: options.body ? JSON.parse(options.body) : null });
+      if (url.endsWith('/models')) return { ok: true, json: async () => ({ data: [{ id: 'standard' }] }) };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'ok' } }] }) };
+    };
+    const result = await chat([{ role: 'user', content: 'hello' }], 'openai');
+    assert.equal(result.text, 'ok');
+    assert.equal(requests[1].body.model, 'standard');
+  });
+
   it('lists models from an OpenAI-compatible endpoint', async () => {
     Object.assign(CONFIG, { AI_BASE_URL: 'https://example.test/v1', AI_API_KEY: 'test-key' });
     globalThis.fetch = async url => {

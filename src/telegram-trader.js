@@ -170,7 +170,9 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           const provider = detectProviders();
           if (provider === 'openai') {
             const models = await listOpenAiModels();
-            const configured = models.includes(CONFIG.AI_MODEL) ? 'configured' : 'not found';
+            const configured = String(CONFIG.AI_MODEL || '').toUpperCase() === 'AUTO' || !CONFIG.AI_MODEL
+              ? 'auto-detect'
+              : models.includes(CONFIG.AI_MODEL) ? 'configured' : 'not found';
             await sendMessage(chatId, `<b>OpenAI-compatible models</b>\nconfigured: <code>${esc(CONFIG.AI_MODEL)}</code> (${configured})\n${models.slice(0, 40).map(model => `<code>${esc(model)}</code>`).join('\n')}`);
           } else {
             await sendMessage(chatId, `anthropic: <code>${esc(CONFIG.ANTHROPIC_MODEL)}</code>\ngoogle: <code>${esc(CONFIG.GEMINI_MODEL)}</code>`);

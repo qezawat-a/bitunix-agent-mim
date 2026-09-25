@@ -24,18 +24,60 @@ export function resolveOpenAiModelsUrl(base = CONFIG.AI_BASE_URL) {
   return `${endpoint}/models`;
 }
 
-export async function listOpenAiModels() {
+export async function listOpenAiModels(signal) {
   if (!CONFIG.AI_API_KEY) throw new Error('OpenAI API key is not configured');
   const url = resolveOpenAiModelsUrl();
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${CONFIG.AI_API_KEY}` },
-    signal: AbortSignal.timeout(15000),
+    signal: signal ?? AbortSignal.timeout(15000),
   });
   if (!res.ok) throw new Error(`openai models ${res.status}: ${(await res.text()).slice(0, 300)}`);
   const payload = await res.json();
   const models = Array.isArray(payload) ? payload : payload.data;
   if (!Array.isArray(models)) throw new Error('OpenAI models response is invalid');
   return models.map(model => typeof model === 'string' ? model : model?.id).filter(Boolean);
+}
+
+let autoModelState = { key: null, model: null };
+
+function rankDiscoveredModels(models) {
+  const blocked = /embed|whisper|tts|audio|dall|image|moderation|rerank|realtime|omni|fine-tune|guard/i;
+  const preferred = /free|flash|mini|lite|nano|small|distil/i;
+  const usable = models.filter(model => !blocked.test(model));
+  return [
+    ...usable.filter(model => /:free$/i.test(model)),
+    ...usable.filter(model => preferred.test(model)),
+    ...usable.filter(model => !/:free$/i.test(model) && !preferred.test(model)),
+  ];
+}
+
+async function probeOpenAiModel(model, signal) {
+  const res = await fetch(resolveOpenAiUrl(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${CONFIG.AI_API_KEY}` },
+    body: JSON.stringify({ model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 8 }),
+    signal,
+  });
+  if (!res.ok) return false;
+  const data = await res.json().catch(() => ({}));
+  return Boolean(data?.choices?.[0]?.message);
+}
+
+async function resolveOpenAiModel(signal) {
+  const configured = String(CONFIG.AI_MODEL || '').trim();
+  if (configured && configured.toUpperCase() !== 'AUTO') return configured;
+  const key = `${resolveOpenAiUrl()}|${CONFIG.AI_API_KEY ? 'configured' : 'missing'}`;
+  if (autoModelState.key === key && autoModelState.model) return autoModelState.model;
+  const models = rankDiscoveredModels(await listOpenAiModels(signal));
+  for (const candidate of models.slice(0, 10)) {
+    try {
+      if (await probeOpenAiModel(candidate, signal)) {
+        autoModelState = { key, model: candidate };
+        return candidate;
+      }
+    } catch {}
+  }
+  throw new Error('No discovered model passed the availability probe; set AI_MODEL explicitly');
 }
 
 function toolDefinitions(tools) {
@@ -147,7 +189,7 @@ function geminiMessages(messages) {
 
 async function chatOpenAI(messages, key, tools, options) {
   const url = resolveOpenAiUrl();
-  const model = CONFIG.AI_MODEL && CONFIG.AI_MODEL !== 'AUTO' ? CONFIG.AI_MODEL : 'gpt-4o-mini';
+  const model = await resolveOpenAiModel(options.signal);
   const body = { model, messages, max_tokens: 2048, temperature: 0.7 };
   const definitions = toOpenAIToolDefs(tools);
   if (definitions.length) {
