@@ -59,6 +59,45 @@ function strictListFromData(data, keys = []) {
   return null;
 }
 
+// Bitunix rejects a qty or price with more decimals than the symbol allows
+// with 10002 "Parameter error", so trim to the pair's own precision. Truncating
+// (never rounding up) keeps the order inside the step size and inside
+// maxLimitOrderVolume.
+function floorToPrecision(value, decimals) {
+  if (!positiveNumber(value) || !Number.isInteger(decimals) || decimals < 0) return value;
+  const [whole, fraction = ''] = Number(value).toFixed(decimals + 4).split('.');
+  const trimmed = fraction.slice(0, decimals);
+  const result = Number(trimmed ? `${whole}.${trimmed}` : whole);
+  return Number.isFinite(result) ? result : value;
+}
+
+const PRICE_KEYS = ['price', 'tpPrice', 'slPrice', 'tpOrderPrice', 'slOrderPrice'];
+const RULES_TTL_MS = 30 * 60 * 1000;
+
+async function applySymbolPrecision(client, order) {
+  const symbol = order.symbol;
+  let rules;
+  try {
+    rules = await client.getSymbolRules(symbol);
+  } catch {
+    return order; // exchange unreachable: send as-is rather than block the trade
+  }
+  if (!rules) return order;
+  const qty = floorToPrecision(order.qty, rules.basePrecision);
+  if (!(qty > 0)) throw new Error(`qty ${order.qty} is below ${symbol}'s ${rules.basePrecision}-decimal step`);
+  order.qty = String(qty);
+  if (rules.minTradeVolume > 0 && qty < rules.minTradeVolume) {
+    throw new Error(`qty ${qty} is under the ${symbol} minimum of ${rules.minTradeVolume}`);
+  }
+  for (const key of PRICE_KEYS) {
+    if (!nonEmpty(order[key])) continue;
+    const price = floorToPrecision(order[key], rules.quotePrecision);
+    if (!(price > 0)) throw new Error(`${key} ${order[key]} is below ${symbol}'s ${rules.quotePrecision}-decimal step`);
+    order[key] = String(price);
+  }
+  return order;
+}
+
 function normalizeStopType(value) {
   const normalized = String(value || '').toUpperCase();
   if (normalized === 'MARK') return 'MARK_PRICE';
@@ -124,6 +163,7 @@ export class BitunixClient {
   baseURL = String(CONFIG.BITUNIX_BASE_URL || '').replace(/\/+$/, '');
   apiKey = CONFIG.BITUNIX_API_KEY;
   secretKey = CONFIG.BITUNIX_API_SECRET;
+  ruleCache = new Map();
 
   static sha256 = (data) => crypto.createHash('sha256').update(data).digest('hex');
 
@@ -241,10 +281,39 @@ export class BitunixClient {
     return this.request('GET', '/api/v1/futures/market/trading_pairs', null, query);
   }
 
+  // basePrecision (qty decimals), quotePrecision (price decimals) and
+  // minTradeVolume come straight from trading_pairs and differ per symbol.
+  async getSymbolRules(symbol) {
+    const key = String(symbol || '').toUpperCase();
+    const cached = this.ruleCache.get(key);
+    if (cached && Date.now() - cached.at < RULES_TTL_MS) return cached.rules;
+    if (cached?.pending) return cached.pending;
+    const pending = (async () => {
+      let rules = null;
+      try {
+        const pairs = listFromData(await this.getTradingPairs(key));
+        const pair = pairs.find(item => String(item?.symbol || '').toUpperCase() === key);
+        if (pair) {
+          rules = {
+            basePrecision: Number.isInteger(Number(pair.basePrecision)) ? Number(pair.basePrecision) : null,
+            quotePrecision: Number.isInteger(Number(pair.quotePrecision)) ? Number(pair.quotePrecision) : null,
+            minTradeVolume: positiveNumber(pair.minTradeVolume) ? Number(pair.minTradeVolume) : 0,
+          };
+        }
+      } catch {
+        rules = null;
+      }
+      this.ruleCache.set(key, { rules, at: Date.now() });
+      return rules;
+    })();
+    this.ruleCache.set(key, { ...(this.ruleCache.get(key) || {}), pending });
+    return pending;
+  }
+
   async placeOrder(params) {
     const order = normalizeOrder(params);
     validateOrder(order);
-    return this.request('POST', '/api/v1/futures/trade/place_order', order, {});
+    return this.request('POST', '/api/v1/futures/trade/place_order', await applySymbolPrecision(this, order), {});
   }
 
   async batchOrder(symbol, orderList) {
@@ -255,7 +324,11 @@ export class BitunixClient {
       return normalizeOrder({ ...order, symbol, tradeSide: order.tradeSide || 'OPEN' });
     });
     for (const order of normalized) validateOrder(order);
-    const payloadOrderList = normalized.map(({ symbol: _outerSymbol, ...order }) => order);
+    const payloadOrderList = [];
+    for (const order of normalized) {
+      const { symbol: _outerSymbol, ...rest } = await applySymbolPrecision(this, order);
+      payloadOrderList.push(rest);
+    }
     return this.request('POST', '/api/v1/futures/trade/batch_order', { symbol, orderList: payloadOrderList }, {});
   }
 

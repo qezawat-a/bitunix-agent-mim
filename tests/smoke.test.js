@@ -211,9 +211,11 @@ describe('exchange safety', () => {
     };
     const client = new BitunixClient();
     await client.closePosition('BTCUSDT', 'p1', { symbol: 'BTCUSDT', positionId: 'p1', side: 'LONG', qty: '2' });
+    // The precision lookup is not part of the order contract under test.
     await client.placeTPSL({ symbol: 'BTCUSDT', positionId: 'p1', tpPrice: '110', slPrice: '90' });
     await client.getLeverageAndMarginMode('BTCUSDT');
     const positionMode = await client.getPositionMode();
+    requests.splice(0, requests.length, ...requests.filter(item => !/trading_pairs/.test(item.url)));
     assert.match(requests[0].url, /trade\/place_order/);
     assert.equal(requests[0].body.side, 'BUY');
     assert.equal(requests[0].body.tradeSide, 'CLOSE');
@@ -224,6 +226,53 @@ describe('exchange safety', () => {
     // account object from GET /api/v1/futures/account.
     assert.match(requests[3].url, /\/api\/v1\/futures\/account\?marginCoin=USDT/);
     assert.equal(positionMode.positionMode, 'HEDGE');
+  });
+
+  it('sends a qty and price the exchange will accept', async () => {
+    // BTCUSDT is basePrecision 4 / quotePrecision 1. Anything longer is
+    // 10002 "Parameter error", which is what place_order kept rejecting.
+    const requests = [];
+    globalThis.fetch = async (url, options) => {
+      requests.push({ url, body: options.body ? JSON.parse(options.body) : null });
+      return {
+        ok: true,
+        json: async () => ({
+          code: 0,
+          data: /trading_pairs/.test(url)
+            ? [{ symbol: 'BTCUSDT', basePrecision: 4, quotePrecision: 1, minTradeVolume: '0.001' }]
+            : { orderId: 'x' },
+        }),
+      };
+    };
+    const client = new BitunixClient();
+    await client.placeOrder({
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      qty: 0.008474576271,
+      price: 118432.87654321,
+      orderType: 'LIMIT',
+      effect: 'GTC',
+      tradeSide: 'OPEN',
+      tpPrice: 120001.55555,
+      slPrice: 117999.44444,
+    });
+    const order = requests.find(item => /trade\/place_order/.test(item.url)).body;
+    assert.equal(order.qty, '0.0084');
+    assert.equal(order.price, '118432.8');
+    assert.equal(order.tpPrice, '120001.5');
+    assert.equal(order.slPrice, '117999.4');
+    // Truncating, not rounding, keeps the value inside the step size.
+    assert.ok(Number(order.qty) <= 0.008474576271);
+
+    // Below the pair minimum: say so instead of letting the exchange say 10002.
+    await assert.rejects(
+      () => client.placeOrder({ symbol: 'BTCUSDT', side: 'BUY', qty: 0.00001, orderType: 'MARKET', tradeSide: 'OPEN' }),
+      /below BTCUSDT's 4-decimal step/,
+    );
+    await assert.rejects(
+      () => client.placeOrder({ symbol: 'BTCUSDT', side: 'BUY', qty: 0.0002, orderType: 'MARKET', tradeSide: 'OPEN' }),
+      /under the BTCUSDT minimum of 0.001/,
+    );
   });
 
   it('does not substitute a different margin coin', async () => {
@@ -255,7 +304,7 @@ describe('exchange safety', () => {
     await client.placeTPSLOrder({ symbol: 'BTCUSDT', positionId: 'p1', slPrice: '90' });
     await client.transferAssetFromMainAccountToSubAccount({ amount: '10', assetType: 'SPOT' });
     await client.transferAssetFromSubAccountToMainAccount({ amount: '10', assetType: 'FUTURES' });
-    const parsed = requests.map(item => ({ path: new URL(item.url).pathname, query: new URL(item.url).searchParams, body: item.options.body ? JSON.parse(item.options.body) : null }));
+    const parsed = requests.filter(item => !/trading_pairs\?symbols=BTCUSDT$/.test(item.url)).map(item => ({ path: new URL(item.url).pathname, query: new URL(item.url).searchParams, body: item.options.body ? JSON.parse(item.options.body) : null }));
     assert.equal(parsed[0].path, '/api/v1/futures/market/tickers');
     assert.equal(parsed[0].query.get('symbols'), 'BTCUSDT');
     assert.equal(parsed[1].path, '/api/v1/futures/market/funding_rate/batch');
