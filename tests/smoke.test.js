@@ -440,6 +440,21 @@ describe('exchange safety', () => {
     assert.match(report, /waiting for first scan/);
   });
 
+  it('trims the scanned price to the pair quotePrecision', async () => {
+    const klines = Array.from({ length: 60 }, (_, index) => ({ close: '0.104712345', high: '0.105', low: '0.104', baseVol: '10' }));
+    const client = {
+      getKlines: async () => klines,
+      getFundingRate: async () => ({ value: 0 }),
+      // BEATUSDT-like: more decimals than 4.
+      getSymbolRules: async () => ({ basePrecision: 0, quotePrecision: 6, minTradeVolume: 1 }),
+    };
+    const scanner = new Scanner(client);
+    Object.assign(CONFIG, { timeframes: ['1m'], tf_min_confidence: 0, min_confidence: 99 });
+    const result = await scanner.scan('BEATUSDT');
+    assert.equal(result.lastPrice, 0.104712);
+    assert.equal(result.price, 0.104712);
+  });
+
   it('shows the price even when the verdict is a hold', async () => {
     const client = { getPendingPositions: async () => [], getTickers: async () => [] };
     const trader = new Trader(client);

@@ -146,11 +146,20 @@ export async function setMenuButton(url = process.env.MINI_APP_URL || '') {
   return true;
 }
 
+// The scanner already trimmed the price to the pair's quotePrecision; this just
+// renders the number without trailing zero noise.
+function formatQuote(value) {
+  if (value === null || value === undefined || value === '') return '-';
+  const number = Number(value);
+  if (!Number.isFinite(number)) return String(value);
+  return String(number);
+}
+
 export function formatSignalReport(res) {
   const tfRows = Object.entries(res.tfSignals || {})
     .map(([tf, s]) => `${esc(tf)}: ${esc(s.direction)} <code>${esc(String(s.confidence))}</code>`)
     .join('\n');
-  return `<b>SIGNAL ${esc(res.symbol)}</b>\nDirection: <b>${esc(res.signal)}</b> | Confidence: <b>${esc(String(res.confidence))}</b>\nPrice: <code>${esc(String(res.lastPrice ?? '-'))}</code>\n${tfRows}`;
+  return `<b>SIGNAL ${esc(res.symbol)}</b>\nDirection: <b>${esc(res.signal)}</b> | Confidence: <b>${esc(String(res.confidence))}</b>\nPrice: <code>${esc(formatQuote(res.price ?? res.lastPrice))}</code>\n${tfRows}`;
 }
 
 export { esc };

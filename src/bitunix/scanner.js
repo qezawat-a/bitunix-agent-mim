@@ -82,6 +82,16 @@ class Scanner {
 
     const lastPrice = klinesMap[timeframes[0]]?.slice(-1)[0]?.close;
     if (!Number.isFinite(Number(lastPrice)) || Number(lastPrice) <= 0) throw new Error(`invalid latest price for ${symbol}`);
+    // Trim to the pair's quotePrecision here, once, so every consumer (report,
+    // /signal, the agent prompt, the order path) shows the price the exchange
+    // itself quotes instead of the raw kline close.
+    let price = Number(lastPrice);
+    try {
+      const rules = await this.client.getSymbolRules(symbol);
+      if (Number.isInteger(rules?.quotePrecision)) {
+        price = Number(price.toFixed(rules.quotePrecision));
+      }
+    } catch {}
     return {
       symbol,
       signal,
@@ -90,7 +100,8 @@ class Scanner {
       // opposite direction on a scan that was too weak to open anything.
       direction,
       rawConfidence: Math.round(averageConfidence * 100) / 100,
-      lastPrice,
+      lastPrice: price,
+      price,
       tfSignals,
       directionCounts,
       allDirectionCounts,
