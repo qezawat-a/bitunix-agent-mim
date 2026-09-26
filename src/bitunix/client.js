@@ -408,8 +408,14 @@ export class BitunixClient {
     return this.request('GET', '/api/v1/futures/account/get_leverage_margin_mode', null, { symbol, marginCoin });
   }
 
-  async getPositionMode() {
-    return this.request('GET', '/api/v1/futures/account/position_mode', null, {});
+  // Bitunix has no standalone "get position mode" endpoint. positionMode is
+  // returned as a field on the account object from GET /api/v1/futures/account
+  // (see https://www.bitunix.com/api-docs/futures/account/get_single_account.html).
+  // A prior version of this called a nonexistent
+  // /api/v1/futures/account/position_mode endpoint, which always failed.
+  async getPositionMode(marginCoin = 'USDT') {
+    const account = await this.getAccount(marginCoin);
+    return { positionMode: account?.positionMode ?? null };
   }
 
   async getPendingOrders(symbolOrOptions = '', extra = {}) {
