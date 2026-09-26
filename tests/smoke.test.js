@@ -207,20 +207,23 @@ describe('exchange safety', () => {
     const requests = [];
     globalThis.fetch = async (url, options) => {
       requests.push({ url, body: options.body ? JSON.parse(options.body) : null });
-      return { ok: true, json: async () => ({ code: 0, data: { orderId: 'x' } }) };
+      return { ok: true, json: async () => ({ code: 0, data: { orderId: 'x', marginCoin: 'USDT', positionMode: 'HEDGE' } }) };
     };
     const client = new BitunixClient();
     await client.closePosition('BTCUSDT', 'p1', { symbol: 'BTCUSDT', positionId: 'p1', side: 'LONG', qty: '2' });
     await client.placeTPSL({ symbol: 'BTCUSDT', positionId: 'p1', tpPrice: '110', slPrice: '90' });
     await client.getLeverageAndMarginMode('BTCUSDT');
-    await client.getPositionMode();
+    const positionMode = await client.getPositionMode();
     assert.match(requests[0].url, /trade\/place_order/);
     assert.equal(requests[0].body.side, 'BUY');
     assert.equal(requests[0].body.tradeSide, 'CLOSE');
     assert.match(requests[1].url, /tpsl\/position\/place_order/);
     assert.equal(Object.hasOwn(requests[1].body, 'tpOrderType'), false);
     assert.match(requests[2].url, /account\/get_leverage_margin_mode\?symbol=BTCUSDT&marginCoin=USDT/);
-    assert.match(requests[3].url, /account\/position_mode/);
+    // Bitunix has no standalone position-mode endpoint; it's a field on the
+    // account object from GET /api/v1/futures/account.
+    assert.match(requests[3].url, /\/api\/v1\/futures\/account\?marginCoin=USDT/);
+    assert.equal(positionMode.positionMode, 'HEDGE');
   });
 
   it('does not substitute a different margin coin', async () => {
