@@ -1,7 +1,7 @@
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { ema, rsi, bollinger, atr, macd, superTrend, atrBreakout, computeSignal } from '../src/bitunix/indicators.js';
+import { ema, rsi, bollinger, atr, macd, superTrend, atrBreakout, computeSignal, STRATEGY_WEIGHTS } from '../src/bitunix/indicators.js';
 import {
   applyPersistedSettings,
   applySettings,
@@ -15,7 +15,6 @@ import { parseThinkingLevel } from '../src/agent/thinking.js';
 import { CONFIG, parseBoolean, applySettingsFile } from '../src/config.js';
 import { BitunixClient, canonicalQuery } from '../src/bitunix/client.js';
 import Scanner from '../src/bitunix/scanner.js';
-import { computeQty, liqDistanceOk } from '../src/bitunix/risk.js';
 import { Trader } from '../src/trader/trader.js';
 import { PositionManager } from '../src/trader/position-manager.js';
 import { setPositionManager, setTraderInstances, traderTools } from '../src/trader/agent-tools.js';
@@ -142,24 +141,21 @@ describe('safety configuration', () => {
   });
 
   it('migrates legacy settings while ignoring secret and unknown fields', () => {
-    const target = { ...getTraderSettings(CONFIG), dry_run: true, auto_trade: false };
-    applyPersistedSettings(target, { symbol: 'ETHUSDT', leverage: 12, BITUNIX_API_SECRET: 'secret', unknown: 'value', dry_run: false });
+    const target = { ...getTraderSettings(CONFIG) };
+    applyPersistedSettings(target, { symbol: 'ETHUSDT', leverage: 12, BITUNIX_API_SECRET: 'secret', unknown: 'value', dry_run: false, auto_trade: true });
     assert.equal(target.symbol, 'BTCUSDT');
     assert.equal(target.leverage, 12);
-    assert.equal(target.dry_run, true);
+    assert.equal(Object.hasOwn(target, 'dry_run'), false);
+    assert.equal(Object.hasOwn(target, 'auto_trade'), false);
     assert.equal(Object.hasOwn(target, 'BITUNIX_API_SECRET'), false);
   });
 
-  it('exposes only public settings and excludes safety flags from persistence', () => {
+  it('exposes only public settings and keeps secrets out of persistence', () => {
     CONFIG.BITUNIX_API_SECRET = 'secret-sentinel';
-    CONFIG.dry_run = true;
-    CONFIG.auto_trade = false;
     const publicSettings = getTraderSettings(CONFIG);
     assert.equal(Object.hasOwn(publicSettings, 'BITUNIX_API_SECRET'), false);
     const persistent = getPersistentSettings(CONFIG);
     assert.equal(Object.hasOwn(persistent, 'symbol'), false);
-    assert.equal(Object.hasOwn(persistent, 'dry_run'), false);
-    assert.equal(Object.hasOwn(persistent, 'auto_trade'), false);
     assert.equal(Object.hasOwn(persistent, 'BITUNIX_API_SECRET'), false);
   });
 });
@@ -356,8 +352,6 @@ describe('exchange safety', () => {
     assert.equal(await trader.computePositionSize(100), 0.3);
     CONFIG.order_unit = 'qty';
     await assert.rejects(() => trader.computePositionSize(100), /explicit quantity/);
-    assert.equal(computeQty({ available: 1000, price: 100, unit: 'position_size', leverage: 10 }), 0.3);
-    assert.equal(computeQty({ available: 1000, price: 100, unit: 'cost', leverage: 10 }), 2);
   });
 
   it('never returns a silent generic answer for an empty LLM response', async () => {
@@ -369,13 +363,6 @@ describe('exchange safety', () => {
     assert.doesNotMatch(reply.content, /Hichi bar nagasht/);
   });
 
-  it('fails closed when liquidation data is missing', () => {
-    assert.equal(liqDistanceOk({ markPrice: 100, liqPrice: undefined }), false);
-    assert.equal(liqDistanceOk({ markPrice: 0, liqPrice: 50 }), false);
-    assert.equal(liqDistanceOk({ markPrice: 100, liqPrice: 0 }), true);
-    assert.equal(liqDistanceOk({ markPrice: 100, liqPrice: 50 }), true);
-  });
-
   it('enforces minimum scanner confidence', async () => {
     const klines = Array.from({ length: 60 }, (_, index) => ({ close: String(100 + index * index), high: String(101 + index * index), low: String(99 + index * index), baseVol: '10' }));
     const scanner = new Scanner({ getKlines: async () => klines, getFundingRate: async () => ({ value: 0 }) });
@@ -384,7 +371,113 @@ describe('exchange safety', () => {
     assert.equal(result.signal, 'hold');
   });
 
-  it('does not order when auto-trade is disabled', async () => {
+  it('counts agreeing strategies, not timeframes', async () => {
+    const rising = Array.from({ length: 60 }, (_, index) => ({
+      close: String(100 + index * index),
+      high: String(101 + index * index),
+      low: String(99 + index * index),
+      baseVol: '10',
+    }));
+    const scanner = new Scanner({ getKlines: async () => rising, getFundingRate: async () => ({ value: 0 }) });
+
+    // A single timeframe with a handful of strategies behind it passes when the
+    // threshold is 2, and is named, rather than silently counting timeframes.
+    Object.assign(CONFIG, { timeframes: ['1m'], tf_min_confidence: 0, min_confidence: 1, min_agreeing_strategies: 2 });
+    const allowed = await scanner.scan('BTCUSDT');
+    assert.equal(allowed.signal, 'bullish');
+    assert.ok(allowed.strategyAgreement >= 2);
+    assert.ok(allowed.agreeingStrategies.length >= 2);
+    assert.ok(allowed.agreeingStrategies.includes('ema'));
+
+    // Raising the bar above what this market can supply blocks it, and says why.
+    Object.assign(CONFIG, { min_agreeing_strategies: Object.keys(STRATEGY_WEIGHTS).length });
+    const blocked = await scanner.scan('BTCUSDT');
+    assert.equal(blocked.signal, 'hold');
+    assert.ok(blocked.blockedBy.includes('not_enough_strategies_agreeing'));
+  });
+
+  it('scores confidence as a real consensus across the committee', () => {    const flat = Array.from({ length: 60 }, () => ({ close: '100', high: '100', low: '100', baseVol: '10' }));
+    const flatResult = computeSignal(flat, Array(20).fill(10), 0);
+    // Every strategy abstains, so there is no consensus at all.
+    assert.equal(flatResult.direction, 'neutral');
+    assert.equal(flatResult.agreeing, 0);
+    assert.equal(flatResult.confidence, 0);
+    assert.equal(flatResult.votes.length, Object.keys(STRATEGY_WEIGHTS).length);
+  });
+
+  it('reports the signal, the price, the PnL and the open positions', async () => {
+    const client = {
+      getPendingPositions: async () => [fakePosition({ positionId: 'p9', side: 'BUY', size: '2', avgPrice: '100', markPrice: '110' })],
+      getTickers: async () => [{ lastPrice: '110' }],
+    };
+    const trader = new Trader(client);
+    trader.positionManager = new PositionManager(client, 'BTCUSDT', { ...getTraderSettings(CONFIG) });
+    Object.assign(CONFIG, { symbol: 'BTCUSDT', report_interval_sec: 30 });
+    trader.state.lastReport = 0;
+
+    const report = await trader.report({
+      lastSignal: { signal: 'bullish', price: '110', confidence: 87, agreeingStrategies: ['ema', 'supertrend'] },
+    });
+    assert.match(report, /signal <b>bullish<\/b>/);
+    assert.match(report, /backed by ema, supertrend/);
+    assert.match(report, /p9 BUY/);
+    // (110 - 100) * 2 on the long.
+    assert.match(report, /total pnl \+20/);
+  });
+
+  it('says so plainly when there is nothing open', async () => {
+    const client = { getPendingPositions: async () => [], getTickers: async () => [] };
+    const trader = new Trader(client);
+    trader.positionManager = new PositionManager(client, 'BTCUSDT', { ...getTraderSettings(CONFIG) });
+    trader.state.lastReport = 0;
+    const report = await trader.report({});
+    assert.match(report, /no open positions/);
+  });
+
+  it('closes a position when the committee reverses hard against it', async () => {
+    const closed = [];
+    const client = {
+      getPendingPositions: async () => [fakePosition()],
+      closePosition: async (...args) => { closed.push(args); return { closed: true }; },
+    };
+    const trader = new Trader(client);
+    trader.positionManager = new PositionManager(client, 'BTCUSDT', { ...getTraderSettings(CONFIG) });
+    trader.positionManager.state.positions = [fakePosition()];
+    Object.assign(CONFIG, { reversal_enabled: true, reversal_confidence: 85, symbol: 'BTCUSDT', cooldown_minutes: 5 });
+
+    // A firm read the other way closes the long, even though nothing here opens
+    // a short: the exit is the point, the agent decides what comes after.
+    const strong = await trader.checkReversal({ direction: 'bearish', rawConfidence: 91 });
+    assert.equal(strong.length, 1);
+    assert.equal(strong[0].positionId, 'p1');
+    assert.equal(closed.length, 1);
+
+    // Too weak to act on, and the same read the wrong way round, do nothing.
+    closed.length = 0;
+    assert.deepEqual(await trader.checkReversal({ direction: 'bearish', rawConfidence: 60 }), []);
+    assert.deepEqual(await trader.checkReversal({ direction: 'bullish', rawConfidence: 95 }), []);
+    assert.equal(closed.length, 0);
+
+    CONFIG.reversal_enabled = false;
+    assert.deepEqual(await trader.checkReversal({ direction: 'bearish', rawConfidence: 99 }), []);
+  });
+
+  it('moves the targets with the strength of the signal that produced them', () => {
+    const pm = new PositionManager({}, 'BTCUSDT', getTraderSettings(CONFIG));
+    const weak = pm.computeTPSL(100, 'bullish', 2, 20);
+    const strong = pm.computeTPSL(100, 'bullish', 2, 100);
+    const wide = pm.computeTPSL(100, 'bullish', 2, 20);
+    assert.ok(Number(strong.tpPrice) - 100 > Number(weak.tpPrice) - 100);
+    assert.ok(100 - Number(strong.slPrice) > 100 - Number(weak.slPrice));
+    // Same strength, same ATR, same targets: nothing drifts between calls.
+    assert.deepEqual(wide, weak);
+    // A zero-strength read still gets the bare ATR distance rather than 0.
+    const floor = pm.computeTPSL(100, 'bullish', 2, 0);
+    assert.equal(floor.tpPrice, '103');
+    assert.equal(floor.slPrice, '97.6');
+  });
+
+  it('reports a confirmed signal without opening a position', async () => {
     const calls = [];
     const client = {
       getPendingPositions: async () => [],
@@ -393,9 +486,9 @@ describe('exchange safety', () => {
     };
     const trader = new Trader(client);
     trader.scanner.scan = async symbol => ({ symbol, signal: 'bullish', lastPrice: '100', tfSignals: {} });
-    CONFIG.auto_trade = false;
-    CONFIG.dry_run = true;
-    const result = await trader.scanAndOpen();
+    Object.assign(CONFIG, { signal_confirm_scans: 1, cooldown_minutes: 0, max_positions: 3 });
+    const result = await trader.scanSignal();
+    assert.equal(result.reason, 'awaiting_agent');
     assert.equal(result.executed, false);
     assert.equal(calls.length, 0);
   });
@@ -410,12 +503,13 @@ describe('exchange safety', () => {
       getPendingPositions: async () => [],
     };
     const trader = new Trader(client);
-    Object.assign(CONFIG, { auto_trade: true, dry_run: false, leverage: 10, margin_amount_pct: 2, cooldown_minutes: 5 });
+    Object.assign(CONFIG, { leverage: 10, margin_amount_pct: 2, cooldown_minutes: 5 });
     const result = await trader.openPosition('BTCUSDT', 100, 'bullish');
     assert.equal(result.orderId, 'o1');
   });
 
-  it('rechecks auto-trade immediately before order submission', async () => {
+  it('rechecks the symbol immediately before order submission', async () => {
+    const originalSymbol = CONFIG.symbol;
     let resolveAccount;
     let orders = 0;
     const account = new Promise(resolve => { resolveAccount = resolve; });
@@ -425,13 +519,16 @@ describe('exchange safety', () => {
       placeOrder: async () => { orders++; return { orderId: 'o1' }; },
     };
     const trader = new Trader(client);
-    trader.scanner.scan = async symbol => ({ symbol, signal: 'bullish', lastPrice: '100', tfSignals: {} });
-    Object.assign(CONFIG, { auto_trade: true, dry_run: false, signal_confirm_scans: 1, cooldown_minutes: 0 });
-    const pending = trader.scanAndOpen();
+    Object.assign(CONFIG, { leverage: 10, margin_amount_pct: 2, cooldown_minutes: 0 });
+    const pending = trader.openPosition('BTCUSDT', 100, 'bullish');
     await new Promise(resolve => setImmediate(resolve));
-    CONFIG.auto_trade = false;
+    CONFIG.symbol = 'ETHUSDT';
     resolveAccount({ available: '100' });
-    await assert.rejects(() => pending, /disabled before order/);
+    try {
+      await assert.rejects(() => pending, /symbol changed/);
+    } finally {
+      CONFIG.symbol = originalSymbol;
+    }
     assert.equal(orders, 0);
   });
 
@@ -441,13 +538,12 @@ describe('exchange safety', () => {
     await assert.rejects(() => trader.computePositionSize(100), /positive/);
   });
 
-  it('serializes concurrent scan cycles into one entry', async () => {
-    let orders = 0;
+  it('serializes concurrent scan cycles into one signal', async () => {
     let scans = 0;
     const client = {
       getPendingPositions: async () => [],
       getAccount: async () => ({ available: '100' }),
-      placeOrder: async () => { orders++; await new Promise(resolve => setTimeout(resolve, 10)); return { orderId: 'o1' }; },
+      placeOrder: async () => { throw new Error('scanning must never place an order'); },
     };
     const trader = new Trader(client);
     trader.scanner.scan = async symbol => {
@@ -455,10 +551,9 @@ describe('exchange safety', () => {
       await new Promise(resolve => setTimeout(resolve, 5));
       return { symbol, signal: 'bullish', lastPrice: '100', tfSignals: {} };
     };
-    Object.assign(CONFIG, { auto_trade: true, dry_run: false, signal_confirm_scans: 1, cooldown_minutes: 0 });
-    const results = await Promise.all([trader.scanAndOpen(), trader.scanAndOpen()]);
+    Object.assign(CONFIG, { signal_confirm_scans: 1, cooldown_minutes: 0, max_positions: 3 });
+    const results = await Promise.all([trader.scanSignal(), trader.scanSignal()]);
     assert.equal(scans, 1);
-    assert.equal(orders, 1);
     assert.equal(results.filter(Boolean).length, 1);
   });
 
@@ -468,7 +563,6 @@ describe('exchange safety', () => {
       getLeverageAndMarginMode: async () => ({ leverage: CONFIG.leverage, marginMode: 'CROSS' }),
       getPositionMode: async () => ({ positionMode: 'HEDGE' }),
     });
-    CONFIG.dry_run = false;
     await trader.verifyAccountSettings();
     const mismatched = new Trader({
       getAccount: async () => ({ positionMode: 'HEDGE' }),
@@ -489,7 +583,6 @@ describe('exchange safety', () => {
       changeLeverage: async () => { changed++; },
     };
     const trader = new Trader(client);
-    CONFIG.dry_run = false;
     const result = await trader.syncAccountSettings({ apply: true });
     assert.equal(result.skipped, 'open_exposure');
     assert.equal(changed, 0);
@@ -498,24 +591,53 @@ describe('exchange safety', () => {
   it('places missing TP/SL protection after a fill', async () => {
     const calls = [];
     const client = { getPendingTPSL: async () => [], placeTPSL: async params => { calls.push(params); return { orderId: 'sl-1' }; } };
-    const pm = new PositionManager(client, 'BTCUSDT', { ...getTraderSettings(CONFIG), dry_run: false });
+    const pm = new PositionManager(client, 'BTCUSDT', { ...getTraderSettings(CONFIG) });
     const result = await pm.ensureProtection(fakePosition({ slPrice: undefined }));
     assert.equal(result.placed, true);
     assert.equal(calls.length, 1);
     assert.equal(calls[0].positionId, 'p1');
   });
 
-  it('targets one position and honors dry-run for management', async () => {
+  it('targets one position and closes it for real past the safety threshold', async () => {
     const calls = [];
     const client = {
       getPendingPositions: async () => [fakePosition()],
-      closePosition: async (...args) => { calls.push(['close', ...args]); },
+      closePosition: async (...args) => { calls.push(['close', ...args]); return { closed: true }; },
       modifyTPSL: async (...args) => { calls.push(['modify', ...args]); },
     };
-    const pm = new PositionManager(client, 'BTCUSDT', { ...getTraderSettings(CONFIG), dry_run: true, sl_liquidation_safety: 0.9 });
-    const result = await pm.checkLiquidationGuard(fakePosition({ markPrice: '100', liqPrice: '99.5' }));
-    assert.equal(result.dryRun, true);
+    // Entry 100 with liquidation at 99.5 leaves 0.5% of room. A mark at 99.55
+    // is 0.45% against, which is 90% of that room: past the 0.9 setting.
+    const pm = new PositionManager(client, 'BTCUSDT', { ...getTraderSettings(CONFIG), sl_liquidation_safety: 0.9 });
+    const result = await pm.checkLiquidationGuard(fakePosition({ markPrice: '99.55', liqPrice: '99.5' }));
+    assert.equal(result.closed, true);
+    assert.deepEqual([calls[0][0], calls[0][1], calls[0][2]], ['close', 'BTCUSDT', 'p1']);
+    assert.equal(calls.length, 1);
+  });
+
+  it('does not cut a position that still has room to liquidation', async () => {
+    const calls = [];
+    const client = {
+      getPendingPositions: async () => [fakePosition()],
+      closePosition: async (...args) => { calls.push(['close', ...args]); return { closed: true }; },
+      modifyTPSL: async (...args) => { calls.push(['modify', ...args]); },
+    };
+    const pm = new PositionManager(client, 'BTCUSDT', { ...getTraderSettings(CONFIG), sl_liquidation_safety: 0.6 });
+    // Entry 100, liquidation 90: 10% of room. Mark at 99.8 is 2% against, so
+    // 20% of the room is gone, not 60%, and the position must be left alone.
+    const result = await pm.checkLiquidationGuard(fakePosition({ markPrice: '99.8', liqPrice: '90' }));
+    assert.match(result.skipped, /room intact/);
     assert.equal(calls.length, 0);
+
+    // A trade in profit is never "near liquidation" no matter how far liq is.
+    assert.match((await pm.checkLiquidationGuard(fakePosition({ markPrice: '130', liqPrice: '90' }))).skipped, /room intact/);
+    assert.equal(calls.length, 0);
+
+    // Only once 60% of the room is actually gone does it act. Mark 94.5 has
+    // given back 55% of it; 93.9 has given back 61%.
+    assert.match((await pm.checkLiquidationGuard(fakePosition({ markPrice: '94.5', liqPrice: '90' }))).skipped, /room intact/);
+    assert.equal(calls.length, 0);
+    assert.equal((await pm.checkLiquidationGuard(fakePosition({ markPrice: '93.9', liqPrice: '90' }))).closed, true);
+    assert.equal(calls.length, 1);
   });
 
   it('normalizes documented LONG positions for management', async () => {
@@ -549,20 +671,18 @@ describe('tool safety', () => {
   it('forwards a specific position ID and never closes all positions', async () => {
     const calls = [];
     setTraderInstances(null, { closePosition: async (...args) => { calls.push(args); return { ok: true }; } });
-    CONFIG.dry_run = false;
     const tool = traderTools.find(item => item.name === 'trader_close_position');
     await tool.handler({ symbol: 'BTCUSDT', positionId: 'p1' });
     assert.deepEqual(calls, [['BTCUSDT', 'p1']]);
   });
 
-  it('does not mutate exchange settings in dry-run mode', async () => {
+  it('reaches the exchange when a tool changes leverage', async () => {
     let calls = 0;
-    setBitunixClient({ changeLeverage: async () => { calls++; } });
-    CONFIG.dry_run = true;
+    setBitunixClient({ changeLeverage: async () => { calls++; return { ok: true }; } });
     const tool = bitunixTools.find(item => item.name === 'bitunix_change_leverage');
     const result = await tool.handler({ symbol: 'BTCUSDT', leverage: 5 });
-    assert.equal(result.dry_run, true);
-    assert.equal(calls, 0);
+    assert.equal(result.ok, true);
+    assert.equal(calls, 1);
   });
 
   it('validates tool arguments and serializes undefined results', () => {

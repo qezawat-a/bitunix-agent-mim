@@ -60,6 +60,7 @@ async function checkSymbolListed(client, symbol) {
 export function createTraderCommands({ client, scanner, trader, agent, loadSession = null, saveSession = null, mcpServers = [], getMcpTools = () => [], reloadMcpTools = null }) {
   const scanState = { scanOn: true };
   const reportState = { reportOn: true };
+  const agentState = { autonomous: Boolean(CONFIG.AGENT_AUTONOMOUS) };
 
   async function handleCommand(msg, text) {
     const chatId = msg.chat.id;
@@ -74,21 +75,21 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
     try {
       switch (cmd) {
         case 'start': {
-          await sendMessage(chatId, `<b>${esc(CONFIG.AGENT_NAME)}</b> started. DRY_RUN=<code>${CONFIG.dry_run ? 1 : 0}</code> AUTO_TRADE=<code>${CONFIG.auto_trade ? 'on' : 'off'}</code>`);
+          await sendMessage(chatId, `<b>${esc(CONFIG.AGENT_NAME)}</b> started. LIVE account <code>${esc(CONFIG.symbol)}</code> — every trade is an agent decision.`);
           return true;
         }
         case 'stop': {
-          CONFIG.auto_trade = false;
           scanState.scanOn = false;
-          await sendMessage(chatId, 'Auto-trade and autonomous scans stopped.');
+          if (agentState) agentState.autonomous = false;
+          await sendMessage(chatId, 'Scanning and the autonomous agent loop are stopped. The agent still answers chat.');
           return true;
         }
         case 'help': {
-          await sendMessage(chatId, '<b>Commands</b>\n/start /stop /status /help /settings /set /get /signal /balance /positions /trades /pnl /close &lt;symbol&gt; &lt;positionId&gt; /close_all &lt;symbol&gt; confirm /dryrun /autotrade /scan /report /leverage /symbol /models /setmodels /harness /skills|/skils /soul|/sould /mcp /thinking /memory /resume /ask /diag');
+          await sendMessage(chatId, '<b>Commands</b>\n/start /stop /status /help /settings /set /get /signal /balance /positions /trades /pnl /close &lt;symbol&gt; &lt;positionId&gt; /close_all &lt;symbol&gt; confirm /scan /report /leverage /symbol /marginmode /positionmode /models /setmodels /harness /skill|/skills /soul /mcp /thinking /memory /resume /ask /diag');
           return true;
         }
         case 'status': {
-          await sendMessage(chatId, `<b>Status</b>\nsymbol <code>${esc(CONFIG.symbol)}</code>\nlev <code>${CONFIG.leverage}</code> ${esc(CONFIG.position_type)}/${esc(CONFIG.position_mode)}\ndry_run <code>${CONFIG.dry_run ? 1 : 0}</code> auto_trade <code>${CONFIG.auto_trade ? 'on' : 'off'}</code>\nscan <code>${scanState.scanOn ? 'on' : 'off'}</code> report <code>${reportState.reportOn ? 'on' : 'off'}</code>\nopen <code>${trader?.state?.positions?.length ?? 0}</code>`);
+          await sendMessage(chatId, `<b>Status</b>\nsymbol <code>${esc(CONFIG.symbol)}</code>\nlev <code>${CONFIG.leverage}</code> ${esc(CONFIG.position_type)}/${esc(CONFIG.position_mode)}\naccount <code>live</code>\nscan <code>${scanState.scanOn ? 'on' : 'off'}</code> report <code>${reportState.reportOn ? 'on' : 'off'}</code>\nopen <code>${trader?.state?.positions?.length ?? 0}</code>`);
           return true;
         }
         case 'settings': {
@@ -100,7 +101,6 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
         case 'set': {
           const [key, ...parts] = rest;
           if (!key || !parts.length) return usage(chatId, 'Usage: /set key value');
-          if (key === 'dry_run' || key === 'auto_trade') return usage(chatId, 'Use /dryrun or /autotrade for safety switches.');
           if (key === 'order_unit') {
             const requestedUnit = parts.join(' ').trim().toLowerCase().replace(/[ -]+/g, '_').replace(/^by_/, '');
             if (!['cost', 'qty', 'position_size', 'position', 'position_sizing', 'size'].includes(requestedUnit)) {
@@ -159,11 +159,6 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
         case 'close': {
           const [symbol, positionId] = rest;
           if (!symbol || !positionId) return usage(chatId, 'Usage: /close SYMBOL POSITION_ID');
-          if (CONFIG.dry_run) {
-            markCooldown(trader);
-            await sendMessage(chatId, `DRY_RUN=1 — simulated close for <code>${esc(symbol)}</code> / <code>${esc(positionId)}</code>.`);
-            return true;
-          }
           const res = await client.closePosition(symbol.toUpperCase(), positionId);
           markCooldown(trader);
           await sendMessage(chatId, `Closed position: <code>${esc(JSON.stringify(res))}</code>`);
@@ -172,29 +167,9 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
         case 'close_all': {
           const [symbol, confirmation] = rest;
           if (!symbol || confirmation?.toLowerCase() !== 'confirm') return usage(chatId, 'Usage: /close_all SYMBOL confirm');
-          if (CONFIG.dry_run) {
-            markCooldown(trader);
-            await sendMessage(chatId, `DRY_RUN=1 — simulated close-all for <code>${esc(symbol)}</code>.`);
-            return true;
-          }
           const res = await client.closeAllPosition(symbol.toUpperCase());
           markCooldown(trader);
           await sendMessage(chatId, `Closed all positions: <code>${esc(JSON.stringify(res))}</code>`);
-          return true;
-        }
-        case 'dryrun': {
-          const next = parseBoolean(arg, !CONFIG.dry_run, 'dryrun');
-          if (!next && (!CONFIG.BITUNIX_API_KEY || !CONFIG.BITUNIX_API_SECRET)) return usage(chatId, 'Both Bitunix API credentials are required for live mode.');
-          CONFIG.dry_run = next;
-          await sendMessage(chatId, `DRY_RUN=<code>${CONFIG.dry_run ? 1 : 0}</code>`);
-          return true;
-        }
-        case 'autotrade': {
-          const next = parseBoolean(arg, !CONFIG.auto_trade, 'autotrade');
-          if (next && (!CONFIG.BITUNIX_API_KEY || !CONFIG.BITUNIX_API_SECRET)) return usage(chatId, 'Both Bitunix API credentials are required for auto-trade.');
-          CONFIG.auto_trade = next;
-          if (CONFIG.auto_trade) scanState.scanOn = true;
-          await sendMessage(chatId, `AUTO_TRADE=<code>${CONFIG.auto_trade ? 'on' : 'off'}</code>`);
           return true;
         }
         case 'scan': {
@@ -213,7 +188,7 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           const next = { ...getTraderSettings(CONFIG), leverage: lev };
           const errors = validateSettings(next);
           if (errors.length) return usage(chatId, `Invalid leverage: ${esc(errors[0])}`);
-          if (!CONFIG.dry_run) await client.changeLeverage(CONFIG.symbol, lev);
+          await client.changeLeverage(CONFIG.symbol, lev);
           applySettings(CONFIG, { leverage: lev });
           await sendMessage(chatId, `leverage <code>${lev}</code>`);
           return true;
@@ -229,6 +204,25 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           if (!positionList || positionList.length) return usage(chatId, 'Cannot change symbol while positions are open.');
           applySettings(CONFIG, { symbol });
           await sendMessage(chatId, `symbol <code>${esc(CONFIG.symbol)}</code>`);
+          return true;
+        }
+        case 'marginmode': {
+          const mode = String(arg || '').trim().toLowerCase();
+          if (!['crossed', 'isolated'].includes(mode)) return usage(chatId, 'Usage: /marginmode crossed|isolated');
+          await client.changeMarginMode(CONFIG.symbol, mode);
+          applySettings(CONFIG, { position_type: mode });
+          await sendMessage(chatId, `margin mode <code>${esc(mode)}</code> on <code>${esc(CONFIG.symbol)}</code>`);
+          return true;
+        }
+        case 'positionmode': {
+          const mode = String(arg || '').trim().toLowerCase();
+          if (!['hedge', 'one_way'].includes(mode)) return usage(chatId, 'Usage: /positionmode hedge|one_way');
+          const positions = await client.getPendingPositions(CONFIG.symbol);
+          const positionList = strictListFromData(positions);
+          if (!positionList || positionList.length) return usage(chatId, 'Cannot change position mode while positions are open.');
+          await client.changePositionMode(mode);
+          applySettings(CONFIG, { position_mode: mode });
+          await sendMessage(chatId, `position mode <code>${esc(mode)}</code> on <code>${esc(CONFIG.symbol)}</code>`);
           return true;
         }
         case 'models': {
@@ -274,6 +268,7 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           await sendMessage(chatId, `<code>${esc(JSON.stringify({ id: input.id, ok: true, reply: reply?.content || '', model: reply?.model || CONFIG.AI_MODEL, rounds: reply?.rounds }))}</code>`);
           return true;
         }
+        case 'skill':
         case 'skills':
         case 'skils': {
           const action = rest.shift()?.toLowerCase() || 'list';

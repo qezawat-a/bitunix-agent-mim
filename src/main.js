@@ -34,10 +34,8 @@ async function main() {
   if (missing.length) console.warn('[warn] missing env:', missing.join(', '));
   const configErrors = validateSettings(getTraderSettings(CONFIG));
   if (configErrors.length) throw new Error(`invalid configuration: ${configErrors.join('; ')}`);
-  if (!CONFIG.dry_run && (!CONFIG.BITUNIX_API_KEY || !CONFIG.BITUNIX_API_SECRET)) {
-    CONFIG.dry_run = true;
-    CONFIG.auto_trade = false;
-    console.warn('[safety] live mode requires both BITUNIX_API_KEY and BITUNIX_API_SECRET; forced dry-run');
+  if (!CONFIG.BITUNIX_API_KEY || !CONFIG.BITUNIX_API_SECRET) {
+    throw new Error('BITUNIX_API_KEY and BITUNIX_API_SECRET are required: this bot has no dry-run mode and trades the live account');
   }
 
   const stored = await loadStore();
@@ -84,14 +82,11 @@ async function main() {
     reloadMcpTools,
   });
 
-  if (!CONFIG.dry_run && CONFIG.BITUNIX_API_KEY && CONFIG.BITUNIX_API_SECRET) {
-    try {
-      await trader.syncAccountSettings({ apply: CONFIG.auto_trade });
-    } catch (error) {
-      CONFIG.auto_trade = false;
-      scanState.scanOn = false;
-      console.error('[safety] account settings verification failed:', error.message);
-    }
+  try {
+    await trader.syncAccountSettings({ apply: true });
+  } catch (error) {
+    scanState.scanOn = false;
+    console.error('[safety] account settings verification failed, scanning stopped:', error.message);
   }
 
   const ws = new BitunixWs({
@@ -156,16 +151,17 @@ async function main() {
 
   let stopping = false;
   let scanTimer = null;
+  let lastSignal = null;
   async function runScanCycle() {
     if (stopping) return;
     try {
-      if (scanState.scanOn) {
-        const signal = await trader.scanCycle();
-        if (signal && reportState.reportOn && CONFIG.ALLOWED_USER_ID) {
-          await sendMessage(CONFIG.ALLOWED_USER_ID, `<b>${esc(CONFIG.AGENT_NAME)}</b> signal <b>${esc(signal.signal)}</b> <code>${esc(signal.symbol)}</code> @ <code>${esc(String(signal.price ?? signal.lastPrice ?? '-'))}</code>`);
-        }
-      } else {
-        await Promise.allSettled([trader.guard(), trader.midManage(), trader.report()]);
+      const signal = scanState.scanOn ? await trader.scanCycle() : null;
+      if (signal) lastSignal = signal;
+      await trader.guard();
+      await trader.midManage();
+      if (reportState.reportOn) {
+        const report = await trader.report({ lastSignal });
+        if (report && CONFIG.ALLOWED_USER_ID) await sendMessage(CONFIG.ALLOWED_USER_ID, report);
       }
     } catch (error) {
       console.error('loop error:', error.message);
@@ -193,7 +189,7 @@ async function main() {
       return;
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, name: CONFIG.AGENT_NAME, dry_run: CONFIG.dry_run, auto_trade: CONFIG.auto_trade }));
+    res.end(JSON.stringify({ ok: true, name: CONFIG.AGENT_NAME, symbol: CONFIG.symbol, positions: trader.state.positions.length }));
   });
   const port = process.env.PORT || 3000;
   server.listen(port, () => console.log(`[health] :${port}`));
@@ -212,7 +208,7 @@ async function main() {
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 
-  console.log(`[${CONFIG.AGENT_NAME}] started. DRY_RUN=${CONFIG.dry_run ? 1 : 0} AUTO_TRADE=${CONFIG.auto_trade ? 'on' : 'off'}`);
+  console.log(`[${CONFIG.AGENT_NAME}] started. LIVE account, symbol=${CONFIG.symbol}, agent decides every trade`);
 }
 
 main().catch((error) => {

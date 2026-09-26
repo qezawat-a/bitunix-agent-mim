@@ -70,12 +70,11 @@ ${memBlock}
 
 ## Trading rules
 - Exchange: Bitunix USDT-M futures. All calls via approved trading tools.
-- Current DRY_RUN=${CONFIG.dry_run ? '1 (demo, no real orders)' : '0 (LIVE)'}.
-- Never open real orders unless the user explicitly enables live mode through the authenticated command channel.
+- This is a LIVE account. There is no dry-run mode and no scripted auto-trader: every order you place is your own decision, made with the trading tools.
 - Signal gate: min_confidence=${CONFIG.min_confidence}, tf_min=${CONFIG.tf_min_confidence}, min_agree=${CONFIG.min_agreeing_strategies}, confirm_scans=${CONFIG.signal_confirm_scans}, cooldown=${CONFIG.cooldown_minutes}min.
 - TP/SL is dynamic (ATR x strength). No static min/max.
 - Hedge mode default (${CONFIG.position_mode}), ${CONFIG.position_type} margin, leverage ${CONFIG.leverage}.
-- Always check balance, liq distance (>= ${CONFIG.sl_liquidation_safety}%), and max positions (${CONFIG.max_positions}) before opening.
+- Always check balance, liquidation room (keep at least ${Math.round(Number(CONFIG.sl_liquidation_safety) * 100)}% of the room to liquidation), and max positions (${CONFIG.max_positions}) before opening.
 - Report every ${CONFIG.report_interval_sec}s: signal, price, PnL of open positions.
 `;
 }

@@ -46,7 +46,7 @@ export const basicTools = [
   },
   {
     name: 'agent_start',
-    description: 'Start agent with new task',
+    description: 'Record a task the agent is working on. Does not place orders by itself.',
     parameters: { type: 'object', properties: { task: { type: 'string' } } },
     async handler({ task }) {
       return { ok: true, task, started: new Date().toISOString() };
@@ -54,11 +54,10 @@ export const basicTools = [
   },
   {
     name: 'agent_stop',
-    description: 'Stop agent execution',
+    description: 'Stop working on the current task. Does not close positions.',
     parameters: { type: 'object', properties: {} },
     async handler() {
-      CONFIG.auto_trade = false;
-      return { ok: true, stopped: new Date().toISOString(), auto_trade: false };
+      return { ok: true, stopped: new Date().toISOString() };
     },
   },
   {

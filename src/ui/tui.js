@@ -4,7 +4,7 @@ import { getTraderSettings } from '../trader/settings.js';
 
 export function startTui({ input = process.stdin, output = process.stdout, handleInput } = {}) {
   const rl = readline.createInterface({ input, output, prompt: 'j-rock> ' });
-  output.write(`J-ROCK TUI — agent=${CONFIG.AGENT_NAME} dry_run=${CONFIG.dry_run ? 1 : 0}\n`);
+  output.write(`J-ROCK TUI — agent=${CONFIG.AGENT_NAME}\n`);
   output.write('Commands: /help /settings /status /quit\n');
   rl.prompt();
   rl.on('line', async line => {
@@ -30,7 +30,7 @@ export function startTui({ input = process.stdin, output = process.stdout, handl
 }
 
 export function formatStatus() {
-  return `symbol=${CONFIG.symbol} lev=${CONFIG.leverage} dry_run=${CONFIG.dry_run ? 1 : 0} auto=${CONFIG.auto_trade ? 'on' : 'off'}`;
+  return `symbol=${CONFIG.symbol} lev=${CONFIG.leverage} live`;
 }
 
 export function formatSettings() {

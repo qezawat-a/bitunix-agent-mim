@@ -11,10 +11,6 @@ function requireClient() {
   return sharedClient;
 }
 
-function dryRun(value) {
-  return Boolean(CONFIG.dry_run) ? { dry_run: true, ...value } : null;
-}
-
 const string = { type: 'string' };
 const number = { type: 'number' };
 const object = { type: 'object' };
@@ -132,7 +128,7 @@ export const bitunixTools = [
       required: ['symbol', 'side', 'qty', 'tradeSide', 'orderType'],
     },
     async handler(params) {
-      return dryRun({ params }) || requireClient().placeOrder(params);
+      return requireClient().placeOrder(params);
     },
   },
   {
@@ -140,7 +136,7 @@ export const bitunixTools = [
     description: 'Place up to five orders in one documented batch request (dry-run aware)',
     parameters: { type: 'object', properties: { symbol: string, orderList: { type: 'array', items: object } }, required: ['symbol', 'orderList'] },
     async handler({ symbol, orderList }) {
-      return dryRun({ symbol, orderList }) || requireClient().batchOrder(symbol, orderList);
+      return requireClient().batchOrder(symbol, orderList);
     },
   },
   {
@@ -148,7 +144,7 @@ export const bitunixTools = [
     description: 'Modify a pending order (dry-run aware)',
     parameters: { type: 'object', properties: { orderId: string, clientId: string, qty: string, price: string, tpPrice: string, tpStopType: string, tpOrderType: string, tpOrderPrice: string, slPrice: string, slStopType: string, slOrderType: string, slOrderPrice: string }, required: ['qty'] },
     async handler(params) {
-      return dryRun({ params }) || requireClient().modifyOrder(params);
+      return requireClient().modifyOrder(params);
     },
   },
   {
@@ -156,7 +152,7 @@ export const bitunixTools = [
     description: 'Cancel one or more pending orders (dry-run aware)',
     parameters: { type: 'object', properties: { symbol: string, orderList: { type: 'array', items: object } }, required: ['symbol', 'orderList'] },
     async handler({ symbol, orderList }) {
-      return dryRun({ symbol, orderList }) || requireClient().cancelOrders(symbol, orderList);
+      return requireClient().cancelOrders(symbol, orderList);
     },
   },
   {
@@ -164,7 +160,7 @@ export const bitunixTools = [
     description: 'Cancel one pending order by order ID (dry-run aware)',
     parameters: { type: 'object', properties: { symbol: string, orderId: string }, required: ['symbol', 'orderId'] },
     async handler({ symbol, orderId }) {
-      return dryRun({ symbol, orderId }) || requireClient().cancelOrder(symbol, orderId);
+      return requireClient().cancelOrder(symbol, orderId);
     },
   },
   {
@@ -172,7 +168,7 @@ export const bitunixTools = [
     description: 'Cancel all pending orders, optionally for one symbol (dry-run aware)',
     parameters: { type: 'object', properties: { symbol: string } },
     async handler({ symbol } = {}) {
-      return dryRun({ symbol }) || requireClient().cancelAllOrders(symbol);
+      return requireClient().cancelAllOrders(symbol);
     },
   },
   {
@@ -180,7 +176,7 @@ export const bitunixTools = [
     description: 'Close one exact position with a reduce-only market order (dry-run aware)',
     parameters: { type: 'object', properties: { symbol: string, positionId: string }, required: ['symbol', 'positionId'] },
     async handler({ symbol, positionId }) {
-      return dryRun({ symbol, positionId }) || requireClient().closePosition(String(symbol).toUpperCase(), positionId);
+      return requireClient().closePosition(String(symbol).toUpperCase(), positionId);
     },
   },
   {
@@ -188,7 +184,7 @@ export const bitunixTools = [
     description: 'Close all positions for an explicitly supplied symbol (dry-run aware)',
     parameters: { type: 'object', properties: { symbol: string }, required: ['symbol'] },
     async handler({ symbol } = {}) {
-      return dryRun({ symbol }) || requireClient().closeAllPosition(symbol);
+      return requireClient().closeAllPosition(symbol);
     },
   },
   {
@@ -196,7 +192,7 @@ export const bitunixTools = [
     description: 'Flash close one exact position ID (dry-run aware)',
     parameters: { type: 'object', properties: { positionId: string }, required: ['positionId'] },
     async handler({ positionId }) {
-      return dryRun({ positionId }) || requireClient().flashClosePosition(positionId);
+      return requireClient().flashClosePosition(positionId);
     },
   },
   {
@@ -244,7 +240,7 @@ export const bitunixTools = [
     description: 'Place a position-linked TP/SL order (dry-run aware)',
     parameters: { type: 'object', properties: { symbol: string, positionId: string, tpPrice: string, tpStopType: string, slPrice: string, slStopType: string }, required: ['symbol', 'positionId'] },
     async handler(params) {
-      return dryRun({ params }) || requireClient().placeTPSL(params);
+      return requireClient().placeTPSL(params);
     },
   },
   {
@@ -252,7 +248,7 @@ export const bitunixTools = [
     description: 'Place a standalone TP/SL order (dry-run aware)',
     parameters: { type: 'object', properties: { symbol: string, positionId: string, tpPrice: string, tpStopType: string, tpOrderType: string, tpOrderPrice: string, tpQty: string, slPrice: string, slStopType: string, slOrderType: string, slOrderPrice: string, slQty: string }, required: ['symbol', 'positionId'] },
     async handler(params) {
-      return dryRun({ params }) || requireClient().placeTPSLOrder(params);
+      return requireClient().placeTPSLOrder(params);
     },
   },
   {
@@ -260,7 +256,7 @@ export const bitunixTools = [
     description: 'Modify a position-linked TP/SL order (dry-run aware)',
     parameters: { type: 'object', properties: { symbol: string, positionId: string, tpPrice: string, tpStopType: string, slPrice: string, slStopType: string }, required: ['symbol', 'positionId'] },
     async handler(params) {
-      return dryRun({ params }) || requireClient().modifyTPSL(params);
+      return requireClient().modifyTPSL(params);
     },
   },
   {
@@ -268,7 +264,7 @@ export const bitunixTools = [
     description: 'Modify a standalone TP/SL order (dry-run aware)',
     parameters: { type: 'object', properties: { orderId: string, tpPrice: string, tpStopType: string, tpOrderType: string, tpOrderPrice: string, tpQty: string, slPrice: string, slStopType: string, slOrderType: string, slOrderPrice: string, slQty: string }, required: ['orderId'] },
     async handler(params) {
-      return dryRun({ params }) || requireClient().modifyTPSLOrder(params);
+      return requireClient().modifyTPSLOrder(params);
     },
   },
   {
@@ -276,7 +272,7 @@ export const bitunixTools = [
     description: 'Cancel one TP/SL order (dry-run aware)',
     parameters: { type: 'object', properties: { symbol: string, orderId: string }, required: ['symbol', 'orderId'] },
     async handler({ symbol, orderId }) {
-      return dryRun({ symbol, orderId }) || requireClient().cancelTPSL(symbol, orderId);
+      return requireClient().cancelTPSL(symbol, orderId);
     },
   },
   {
@@ -300,7 +296,7 @@ export const bitunixTools = [
     description: 'Change leverage (dry-run aware)',
     parameters: { type: 'object', properties: { symbol: string, leverage: number, marginCoin: string }, required: ['symbol', 'leverage'] },
     async handler({ symbol, leverage, marginCoin }) {
-      return dryRun({ symbol, leverage, marginCoin }) || requireClient().changeLeverage(symbol, leverage, marginCoin);
+      return requireClient().changeLeverage(symbol, leverage, marginCoin);
     },
   },
   {
@@ -308,7 +304,7 @@ export const bitunixTools = [
     description: 'Change crossed/isolated margin mode (dry-run aware)',
     parameters: { type: 'object', properties: { symbol: string, marginMode: string, marginCoin: string }, required: ['symbol', 'marginMode'] },
     async handler({ symbol, marginMode, marginCoin }) {
-      return dryRun({ symbol, marginMode, marginCoin }) || requireClient().changeMarginMode(symbol, marginMode, marginCoin);
+      return requireClient().changeMarginMode(symbol, marginMode, marginCoin);
     },
   },
   {
@@ -316,7 +312,7 @@ export const bitunixTools = [
     description: 'Change one-way/hedge position mode (dry-run aware)',
     parameters: { type: 'object', properties: { positionMode: string }, required: ['positionMode'] },
     async handler({ positionMode }) {
-      return dryRun({ positionMode }) || requireClient().changePositionMode(positionMode);
+      return requireClient().changePositionMode(positionMode);
     },
   },
   {
@@ -324,7 +320,7 @@ export const bitunixTools = [
     description: 'Add or reduce isolated position margin (dry-run aware)',
     parameters: { type: 'object', properties: { symbol: string, amount: string, marginCoin: string, side: string, positionId: string }, required: ['symbol', 'amount'] },
     async handler({ symbol, amount, marginCoin, side, positionId }) {
-      return dryRun({ symbol, amount, marginCoin, side, positionId }) || requireClient().adjustPositionMargin(symbol, amount, { marginCoin, side, positionId });
+      return requireClient().adjustPositionMargin(symbol, amount, { marginCoin, side, positionId });
     },
   },
   {
@@ -372,7 +368,7 @@ export const bitunixTools = [
     description: 'Transfer copy-trading assets from the main account to a sub-account (dry-run aware)',
     parameters: { type: 'object', properties: { amount: string, assetType: { type: 'string', enum: ['SPOT', 'FUTURES'] } }, required: ['amount', 'assetType'] },
     async handler(params) {
-      return dryRun({ params }) || requireClient().transferAssetFromMainAccountToSubAccount(params);
+      return requireClient().transferAssetFromMainAccountToSubAccount(params);
     },
   },
   {
@@ -380,7 +376,7 @@ export const bitunixTools = [
     description: 'Transfer copy-trading assets from a sub-account to the main account (dry-run aware)',
     parameters: { type: 'object', properties: { amount: string, assetType: { type: 'string', enum: ['SPOT', 'FUTURES'] } }, required: ['amount', 'assetType'] },
     async handler(params) {
-      return dryRun({ params }) || requireClient().transferAssetFromSubaccountToMainAccount(params);
+      return requireClient().transferAssetFromSubaccountToMainAccount(params);
     },
   },
   {

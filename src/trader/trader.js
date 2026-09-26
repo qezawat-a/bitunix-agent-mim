@@ -2,6 +2,7 @@ import Scanner from '../bitunix/scanner.js';
 import { strictListFromData } from '../bitunix/client.js';
 import { PositionManager } from './position-manager.js';
 import { CONFIG } from '../config.js';
+import { esc as escText } from '../telegram-bot.js';
 
 function validPositive(value) {
   const number = Number(value);
@@ -13,7 +14,7 @@ export class Trader {
   scanner;
   positionManager;
   state = {
-    lastScan: 0,
+    lastScan: null,
     lastGuard: 0,
     lastReport: 0,
     lastManage: 0,
@@ -59,7 +60,6 @@ export class Trader {
   }
 
   async verifyAccountSettings() {
-    if (CONFIG.dry_run) return { skipped: 'dry_run' };
     const [account, leverageData, positionModeData] = await Promise.all([
       this.client.getAccount('USDT'),
       this.client.getLeverageAndMarginMode(CONFIG.symbol),
@@ -85,7 +85,6 @@ export class Trader {
   }
 
   async syncAccountSettings({ apply = false } = {}) {
-    if (CONFIG.dry_run) return { skipped: 'dry_run' };
     const [positions, orders] = await Promise.all([
       this.client.getPendingPositions(CONFIG.symbol),
       this.client.getPendingOrders(CONFIG.symbol),
@@ -114,7 +113,9 @@ export class Trader {
     return { ...(await this.verifyAccountSettings()), applied: true };
   }
 
-  async scanAndOpen() {
+  // Produces a confirmed signal and hands it up. Opening a position is the
+  // agent's decision, not this layer's, so nothing here places an order.
+  async scanSignal() {
     const now = Date.now();
     if (now < this.state.cooldownUntil || now < this.state.orderUnknownUntil) return null;
     const symbol = CONFIG.symbol;
@@ -124,36 +125,64 @@ export class Trader {
     try {
       const result = await this.scanner.scan(symbol);
       if (CONFIG.symbol !== symbol) return null;
+      this.state.lastScan = `${result.signal} ${Math.round(Number(result.confidence) || 0)}%${result.agreeingStrategies?.length ? ` (${result.agreeingStrategies.join(', ')})` : ''}`;
+      const reversals = await this.checkReversal(result);
       if (!['bullish', 'bearish'].includes(result.signal)) {
         this.updateConfirmation(symbol, result.signal);
-        return null;
+        return reversals.length ? { symbol, signal: result.signal, confidence: result.confidence, reversals } : null;
       }
 
       const confirmations = this.updateConfirmation(symbol, result.signal);
       const signal = { ...result, executed: false, confirmations };
       if (confirmations < CONFIG.signal_confirm_scans) {
         signal.reason = 'confirmation_pending';
-        return signal;
-      }
-      if (!CONFIG.auto_trade) {
-        signal.reason = 'auto_trade_disabled';
-        return signal;
+        return { ...signal, reversals };
       }
 
       await this.reconcilePositions();
       if (this.state.positions.length >= CONFIG.max_positions) {
         signal.reason = 'max_positions';
-        return signal;
+        return { ...signal, reversals };
       }
 
       const entryPrice = Number(result.lastPrice);
       if (!validPositive(entryPrice)) throw new Error('scanner returned an invalid entry price');
-      const atr = result.tfSignals?.[CONFIG.timeframes[0]]?.atr ?? null;
-      const order = await this.openPosition(symbol, entryPrice, result.signal, atr);
-      return { ...signal, executed: true, order, price: entryPrice };
+      return {
+        ...signal,
+        reversals,
+        reason: 'awaiting_agent',
+        price: entryPrice,
+        atr: result.tfSignals?.[CONFIG.timeframes[0]]?.atr ?? null,
+      };
     } finally {
       this.entryInFlight.delete(symbol);
     }
+  }
+
+  // A strong read against an open position is an exit, not a shortcut into the
+  // opposite trade: the agent is told the position was closed so it can decide
+  // what to do next. Judged on the raw committee direction, so a reversal still
+  // fires when the read is too weak to open anything.
+  async checkReversal(scan) {
+    if (!CONFIG.reversal_enabled || !scan) return [];
+    const direction = scan.direction;
+    if (!['bullish', 'bearish'].includes(direction)) return [];
+    const confidence = Number(scan.rawConfidence);
+    if (!Number.isFinite(confidence) || confidence < Number(CONFIG.reversal_confidence)) return [];
+    const wanted = direction === 'bullish' ? 'SELL' : 'BUY';
+    const positions = await this.positionManager.fetchPositions();
+    const closed = [];
+    for (const position of positions) {
+      if (position.side !== wanted) continue;
+      try {
+        const result = await this.client.closePosition(CONFIG.symbol, position.positionId, position);
+        this.state.cooldownUntil = Date.now() + Number(CONFIG.cooldown_minutes) * 60000;
+        closed.push({ positionId: position.positionId, side: position.side, confidence, result });
+      } catch (error) {
+        this.state.lastReversalError = error.message;
+      }
+    }
+    return closed;
   }
 
   async reconcileOrder(symbol, clientId) {
@@ -172,8 +201,7 @@ export class Trader {
     return null;
   }
 
-  async openPosition(symbol, entryPrice, direction, atr = null) {
-    if (!CONFIG.auto_trade) throw new Error('auto_trade is disabled');
+  async openPosition(symbol, entryPrice, direction, atr = null, confidence = null) {
     if (!['bullish', 'bearish'].includes(direction)) throw new Error('invalid trade direction');
     if (!validPositive(entryPrice)) throw new Error('entry price must be positive');
     this.state.cooldownUntil = Date.now() + Number(CONFIG.cooldown_minutes) * 60000;
@@ -181,7 +209,10 @@ export class Trader {
 
     const qty = await this.computePositionSize(entryPrice);
     const clientId = `jrock-open-${symbol}-${Date.now()}`;
-    const levels = this.positionManager.computeTPSL(entryPrice, direction, atr, CONFIG.min_confidence);
+    // The live signal's own strength sizes the targets. Falling back to the
+    // floor keeps a manual entry from being sized as if it were a strong read.
+    const strength = Number.isFinite(Number(confidence)) ? Number(confidence) : CONFIG.min_confidence;
+    const levels = this.positionManager.computeTPSL(entryPrice, direction, atr, strength);
     const body = {
       symbol,
       side: direction === 'bullish' ? 'BUY' : 'SELL',
@@ -197,9 +228,7 @@ export class Trader {
       clientId,
     };
 
-    if (!CONFIG.auto_trade) throw new Error('auto_trade was disabled before order submission');
     if (CONFIG.symbol !== symbol) throw new Error('symbol changed before order submission');
-    if (CONFIG.dry_run) return { dryRun: true, body };
     let order;
     try {
       order = await this.client.placeOrder(body);
@@ -255,8 +284,7 @@ export class Trader {
       const errors = [];
       for (const position of positions) {
         try {
-          const result = await this.positionManager.checkLiquidationGuard(position);
-          if (result?.dryRun && result.positionId) this.state.cooldownUntil = this.positionManager.state.cooldownUntil;
+          await this.positionManager.checkLiquidationGuard(position);
         } catch (error) {
           errors.push({ positionId: position.positionId, message: error.message });
         }
@@ -318,24 +346,59 @@ export class Trader {
     }
   }
 
-  async report() {
+  // Everything option 8 asks for: the read, the price, the PnL of whatever is
+  // open, and the open positions themselves. Returns null while it is too early
+  // for the next report.
+  async report({ lastSignal = null } = {}) {
     const now = Date.now();
-    if (now < this.state.lastReport + CONFIG.report_interval_sec * 1000) return;
-    console.log(`[Report ${new Date().toISOString()}] symbol=${CONFIG.symbol} positions=${this.state.positions.length}`);
+    if (now < this.state.lastReport + CONFIG.report_interval_sec * 1000) return null;
     this.state.lastReport = now;
+    const lines = [`<b>${now}</b> <code>${CONFIG.symbol}</code>`];
+    if (lastSignal) {
+      lines.push(`signal <b>${escText(lastSignal.signal)}</b> @ <code>${escText(String(lastSignal.price ?? lastSignal.lastPrice ?? '-'))}</code> (${Math.round(Number(lastSignal.confidence) || 0)}%)`);
+      if (lastSignal.agreeingStrategies?.length) lines.push(`backed by ${escText(lastSignal.agreeingStrategies.join(', '))}`);
+    }
+    if (this.state.lastScan) lines.push(`last scan <b>${escText(this.state.lastScan)}</b>`);
+
+    let positions = [];
+    try {
+      positions = await this.positionManager.fetchPositions();
+    } catch (error) {
+      lines.push(`positions unavailable: ${escText(error.message)}`);
+    }
+    if (!positions.length) {
+      lines.push('no open positions');
+      return lines.join('\n');
+    }
+
+    let totalPnl = 0;
+    for (const position of positions) {
+      let pnl = null;
+      try {
+        pnl = this.positionManager.unrealizedPnl(position);
+      } catch (error) {
+        pnl = null;
+      }
+      if (pnl !== null) totalPnl += pnl;
+      const pnlText = pnl === null ? 'pnl n/a' : `pnl ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)}`;
+      lines.push(`${escText(position.positionId)} ${escText(position.side)} qty <code>${escText(String(position.size ?? '-'))}</code> mark <code>${escText(String(position.markPrice ?? '-'))}</code> ${pnlText}`);
+    }
+    lines.push(`total pnl ${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(4)} ${CONFIG.margin_coin || 'USDT'}`);
+    return lines.join('\n');
   }
 
+  // Scans, then the two position loops. The report is left to the caller so the
+  // cycle is not driven twice and the interval is honoured in one place.
   async scanCycle() {
     let signal = null;
     let scanError = null;
     try {
-      signal = await this.scanAndOpen();
+      signal = await this.scanSignal();
     } catch (error) {
       scanError = error;
     }
     try { await this.guard(); } catch (error) { console.error('guard error:', error.message); }
     try { await this.midManage(); } catch (error) { console.error('manage error:', error.message); }
-    try { await this.report(); } catch (error) { console.error('report error:', error.message); }
     if (scanError) throw scanError;
     return signal;
   }

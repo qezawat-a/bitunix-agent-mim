@@ -14,8 +14,9 @@ cp .env.example .env
 npm start
 ```
 
-Default safety: `DRY_RUN=1`. Real Bitunix orders are sent only after you
-explicitly switch with `/dryrun 0` and enable `/autotrade on` in Telegram.
+This bot has no dry-run mode. It talks to the live Bitunix account, and every
+order is a decision the agent makes on its own judgement — there is no scripted
+auto-trader. Use the Telegram chat to talk to it.
 
 ## Model selection (`AI_MODEL=AUTO`)
 
@@ -52,8 +53,8 @@ the code. `/models` shows what the provider returned plus which model is active.
 - Bitunix order units: `cost` (Cost Value), `qty` (Quantity Value), and
   `position_size` (Nominal Value); leverage affects Cost Value sizing only
 - Autonomous agent loop with thinking levels, model auto-refresh, sessions
-- Telegram bot: `/status`, `/start`, `/stop`, `/settings`, `/dryrun`,
-  `/autotrade`, `/memory`, `/resume`, `/models`, `/setModels`, `/harness`,
+- Telegram bot: `/status`, `/start`, `/stop`, `/settings`,
+  `/memory`, `/resume`, `/models`, `/setModels`, `/harness`,
   `/skills` (or `/skils`), `/soul` (or `/sould`), `/mcp`, and `/ask`
 - Telegram Web App control panel served at `/app` locally; set `MINI_APP_URL`
   to its public HTTPS deployment to enable the Telegram menu button
@@ -107,5 +108,5 @@ tests/
 
 ## Safety
 
-Never commit `.env`. Use `DRY_RUN=1` for demo trading. Real orders require
-`DRY_RUN=0` and valid Bitunix API keys.
+Never commit `.env`. Bitunix API keys are mandatory: the bot refuses to start
+without them, because it has no dry-run mode to fall back to.

@@ -39,6 +39,8 @@ export const CONFIG = {
 
   // Database
   DATABASE_URL: S('DATABASE_URL', ''),
+  DATABASE_SSL: S('DATABASE_SSL', 'true'),
+  DATABASE_SSL_REJECT_UNAUTHORIZED: S('DATABASE_SSL_REJECT_UNAUTHORIZED', 'true'),
 
   // Telegram
   TELEGRAM_BOT_TOKEN: S('TELEGRAM_BOT_TOKEN', ''),
@@ -81,13 +83,11 @@ export const CONFIG = {
   mid_manage_interval_sec: Number(S('mid_manage_interval_sec', 15)),
   order_unit: S('order_unit', 'cost'),
   position_sizing_margin_pct: Number(S('position_sizing_margin_pct', 2)),
-  dry_run: B(S('DRY_RUN', '1'), true, 'DRY_RUN'),
-  auto_trade: B(S('AUTO_TRADE', '0'), false, 'AUTO_TRADE'),
   store_id: S('STORE_ID', 'j-rock-1'),
 };
 
 const FILE_TRADER_KEYS = new Set([
-  'leverage', 'position_type', 'timeframes', 'margin_amount_pct', 'margin_risk_pct',
+  'symbol', 'leverage', 'position_type', 'timeframes', 'margin_amount_pct', 'margin_risk_pct',
   'min_confidence', 'tf_min_confidence', 'min_agreeing_strategies', 'signal_confirm_scans',
   'cooldown_minutes', 'max_positions', 'position_mode', 'scan_interval_sec', 'guard_interval_sec',
   'breakeven_threshold_pct', 'trailing_stop_pct', 'trailing_trigger_roi_pct', 'trailing_distance_pct',

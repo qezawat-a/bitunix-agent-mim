@@ -3,14 +3,27 @@ import { CONFIG } from '../config.js';
 import { readLocal, writeLocal } from './memory.js';
 
 let pool = null;
+let poolFailed = false;
+
+// Neon and most hosted providers verify TLS, but a local Postgres or one behind
+// a proxy may not. DATABASE_SSL=false turns it off entirely and
+// DATABASE_SSL_REJECT_UNAUTHORIZED=false keeps TLS on while skipping the check.
+function sslOption() {
+  if (String(CONFIG.DATABASE_SSL).toLowerCase() === 'false') return false;
+  const rejectUnauthorized = String(CONFIG.DATABASE_SSL_REJECT_UNAUTHORIZED ?? 'true').toLowerCase() !== 'false';
+  return { rejectUnauthorized };
+}
 
 function getPool() {
   if (!CONFIG.DATABASE_URL) return null;
+  // One unreachable database must not retry on every save for the life of the process.
+  if (poolFailed) return null;
   if (!pool) {
     pool = new Pool({
       connectionString: CONFIG.DATABASE_URL,
-      ssl: { rejectUnauthorized: true },
+      ssl: sslOption(),
     });
+    pool.on('error', error => console.error('database pool error:', error.message));
   }
   return pool;
 }
@@ -49,28 +62,42 @@ export async function loadStore() {
   }
 }
 
+// Re-enables the database after a failed save, so /diag and the next restart
+// can report a recovered connection.
+export function resetPersistFailure() {
+  poolFailed = false;
+}
+
+// The local file is written first and is the durable copy, so a database that
+// is down or misconfigured must not throw: the caller keeps running on the file
+// and the next save may well succeed.
 export async function saveStore(data) {
   const local = await writeLocal(data);
   const p = getPool();
   if (!p) return local;
-  await ensureSchema();
-  const client = await p.connect();
   try {
-    await client.query('BEGIN');
+    await ensureSchema();
+    const client = await p.connect();
     try {
-      for (const [key, value] of Object.entries(data)) {
-        await client.query(
-          'INSERT INTO trader_store (id, key, value) VALUES ($1, $2, $3) ON CONFLICT (id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()',
-          [CONFIG.store_id, key, JSON.stringify(value)]
-        );
+      await client.query('BEGIN');
+      try {
+        for (const [key, value] of Object.entries(data)) {
+          await client.query(
+            'INSERT INTO trader_store (id, key, value) VALUES ($1, $2, $3) ON CONFLICT (id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()',
+            [CONFIG.store_id, key, JSON.stringify(value)]
+          );
+        }
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
       }
-      await client.query('COMMIT');
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
+    } finally {
+      client.release();
     }
-  } finally {
-    client.release();
+  } catch (error) {
+    poolFailed = true;
+    console.error('persist save error, keeping the local copy:', error.message);
   }
   return local;
 }

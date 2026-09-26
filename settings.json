@@ -26,8 +26,7 @@
     "trailing_trigger_roi_pct": 25,
     "reversal_enabled": true,
     "reversal_confidence": 85,
-    "dry_run": true,
-    "auto_trade": false
+    "on_tpsl_failure": "cancel"
   },
   "mcp": { "servers": [] }
 }

@@ -139,7 +139,7 @@ export function atr(highs, lows, closes, period = 14) {
   return recent.reduce((sum, value) => sum + value, 0) / period;
 }
 
-export function adx(highs, lows, closes, period = 14) {
+export function adxWithDirection(highs, lows, closes, period = 14) {
   if (!validSeries(highs) || !validSeries(lows) || !validSeries(closes) || period < 1 || highs.length < period + 1 || highs.length !== lows.length || highs.length !== closes.length) return null;
   const trueRanges = [];
   const positiveMovement = [];
@@ -165,13 +165,15 @@ export function adx(highs, lows, closes, period = 14) {
     minus += negativeMovement[index];
   }
   const dx = [];
+  let plusDi = 0;
+  let minusDi = 0;
   const pushDx = () => {
     if (tr <= 0) {
       dx.push(0);
       return;
     }
-    const plusDi = plus / tr * 100;
-    const minusDi = minus / tr * 100;
+    plusDi = plus / tr * 100;
+    minusDi = minus / tr * 100;
     dx.push(Math.abs(plusDi - minusDi) / (plusDi + minusDi || 1) * 100);
   };
   pushDx();
@@ -182,10 +184,14 @@ export function adx(highs, lows, closes, period = 14) {
     pushDx();
   }
   if (!dx.length) return null;
-  if (dx.length < period) return dx.reduce((sum, value) => sum + value, 0) / dx.length;
   let value = dx.slice(0, period).reduce((sum, item) => sum + item, 0) / period;
   for (let index = period; index < dx.length; index++) value = ((value * (period - 1)) + dx[index]) / period;
-  return value;
+  return { adx: dx.length < period ? dx.reduce((sum, item) => sum + item, 0) / dx.length : value, plusDi, minusDi };
+}
+
+export function adx(highs, lows, closes, period = 14) {
+  const result = adxWithDirection(highs, lows, closes, period);
+  return result ? result.adx : null;
 }
 
 export function volumeScore(volumes, period = 20) {
@@ -210,6 +216,26 @@ export function fundingSignal(fundingRate) {
   return 'neutral';
 }
 
+// Weights are the committee's standing. The sum of the weights is what a
+// unanimous vote scores, so confidence is a real 0-100 consensus rather than
+// the absolute value of an arbitrary score.
+export const STRATEGY_WEIGHTS = Object.freeze({
+  ema: 25,
+  atr_breakout: 25,
+  rsi: 20,
+  macd: 20,
+  bollinger: 20,
+  supertrend: 20,
+  momentum: 15,
+  volume: 10,
+  adx: 10,
+  funding: 5,
+});
+
+function vote(name, direction, detail) {
+  return { name, direction, detail, weight: STRATEGY_WEIGHTS[name] };
+}
+
 export function computeSignal(symbolKlines, volumes, fundingRate) {
   if (!Array.isArray(symbolKlines) || symbolKlines.length < 60) throw new Error('at least 60 valid klines are required');
   if (!validSeries(volumes) || volumes.length < 20) throw new Error('at least 20 valid volumes are required');
@@ -220,60 +246,69 @@ export function computeSignal(symbolKlines, volumes, fundingRate) {
     throw new Error('kline values must be positive finite numbers');
   }
   const last = closes[closes.length - 1];
-  const signals = {};
+  const votes = [];
   const emaValue = ema(closes, 20);
   const emaFast = ema(closes, 50);
   const rsiValue = rsi(closes);
   const macdValue = macd(closes);
   const bands = bollinger(closes);
   const atrValue = atr(highs, lows, closes);
-  const adxValue = adx(highs, lows, closes);
+  const adxResult = adxWithDirection(highs, lows, closes);
   const superTrendValue = superTrend(highs, lows, closes);
   const atrBreakoutValue = atrBreakout(highs, lows, closes);
   const momentum = momentumScore(closes);
   const volume = volumeScore(volumes);
   const funding = fundingSignal(fundingRate);
 
-  let score = 0;
-  if (emaValue && emaFast && last > emaValue && last > emaFast) { score += 25; signals.ema = 'bullish'; }
-  else if (emaValue && emaFast && last < emaValue && last < emaFast) { score -= 25; signals.ema = 'bearish'; }
-  else signals.ema = 'neutral';
+  if (emaValue && emaFast && last > emaValue && last > emaFast) votes.push(vote('ema', 1, 'above both EMAs'));
+  else if (emaValue && emaFast && last < emaValue && last < emaFast) votes.push(vote('ema', -1, 'below both EMAs'));
+  else votes.push(vote('ema', 0, 'EMAs disagree with price'));
 
   if (rsiValue !== null) {
-    if (rsiValue < 30) { score += 20; signals.rsi = 'oversold'; }
-    else if (rsiValue > 70) { score -= 20; signals.rsi = 'overbought'; }
-    else { score += 5; signals.rsi = 'neutral'; }
+    if (rsiValue < 30) votes.push(vote('rsi', 1, `oversold ${rsiValue.toFixed(1)}`));
+    else if (rsiValue > 70) votes.push(vote('rsi', -1, `overbought ${rsiValue.toFixed(1)}`));
+    else votes.push(vote('rsi', 0, `neutral ${rsiValue.toFixed(1)}`));
   }
 
-  if (macdValue === 'bullish') { score += 20; signals.macd = 'bullish'; }
-  else if (macdValue === 'bearish') { score -= 20; signals.macd = 'bearish'; }
-  else signals.macd = 'neutral';
+  votes.push(macdValue === 'neutral' ? vote('macd', 0, 'no cross') : vote('macd', macdValue === 'bullish' ? 1 : -1, macdValue));
 
-  if (bands && last < bands.lower) { score += 20; signals.bollinger = 'oversold'; }
-  else if (bands && last > bands.upper) { score -= 20; signals.bollinger = 'overbought'; }
-  else signals.bollinger = 'neutral';
+  if (bands && last < bands.lower) votes.push(vote('bollinger', 1, 'below lower band'));
+  else if (bands && last > bands.upper) votes.push(vote('bollinger', -1, 'above upper band'));
+  else votes.push(vote('bollinger', 0, 'inside the bands'));
 
   if (momentum !== null) {
-    if (momentum > 1) { score += 15; signals.momentum = 'bullish'; }
-    else if (momentum < -1) { score -= 15; signals.momentum = 'bearish'; }
-    else signals.momentum = 'neutral';
+    if (momentum > 1) votes.push(vote('momentum', 1, `rising ${momentum.toFixed(2)}`));
+    else if (momentum < -1) votes.push(vote('momentum', -1, `falling ${momentum.toFixed(2)}`));
+    else votes.push(vote('momentum', 0, 'flat'));
   }
 
-  if (volume !== null && volume > 10) { score += 10; signals.volume = 'confirming'; }
-  else signals.volume = 'neutral';
-  if (adxValue !== null && adxValue > 25) { score += 10; signals.adx = 'trending'; }
-  else signals.adx = 'neutral';
-  if (superTrendValue === 'bullish') { score += 20; signals.supertrend = 'bullish'; }
-  else if (superTrendValue === 'bearish') { score -= 20; signals.supertrend = 'bearish'; }
-  else signals.supertrend = 'neutral';
-  if (atrBreakoutValue === 'bullish') { score += 25; signals.atr_breakout = 'bullish'; }
-  else if (atrBreakoutValue === 'bearish') { score -= 25; signals.atr_breakout = 'bearish'; }
-  else signals.atr_breakout = 'neutral';
-  if (funding === 'bullish') score += 5;
-  else if (funding === 'bearish') score -= 5;
-  signals.funding = funding;
+  votes.push(superTrendValue === 'neutral' ? vote('supertrend', 0, 'no flip') : vote('supertrend', superTrendValue === 'bullish' ? 1 : -1, superTrendValue));
+  votes.push(atrBreakoutValue === 'neutral' ? vote('atr_breakout', 0, 'inside the range') : vote('atr_breakout', atrBreakoutValue === 'bullish' ? 1 : -1, atrBreakoutValue));
 
-  const confidence = Math.min(100, Math.max(0, Math.round(Math.abs(score))));
-  const direction = score > 0 ? 'bullish' : score < 0 ? 'bearish' : 'neutral';
-  return { confidence, direction, signals, score, atr: atrValue, last };
+  // Volume only votes when it is actually elevated, and then it votes for
+  // whichever way price has been going, so it confirms rather than leads.
+  const recentMove = closes.length > 3 ? last - closes[closes.length - 4] : 0;
+  if (volume !== null && volume > 10) votes.push(vote('volume', recentMove > 0 ? 1 : recentMove < 0 ? -1 : 0, `${volume.toFixed(1)}% above average volume`));
+  else votes.push(vote('volume', 0, 'average volume'));
+
+  if (adxResult && adxResult.adx > 25) {
+    const trendDir = adxResult.plusDi > adxResult.minusDi ? 1 : -1;
+    votes.push(vote('adx', trendDir, `trending ${adxResult.adx.toFixed(1)}`));
+  } else {
+    votes.push(vote('adx', 0, adxResult ? `weak trend ${adxResult.adx.toFixed(1)}` : 'no data'));
+  }
+
+  votes.push(funding === 'neutral' ? vote('funding', 0, 'funding flat') : vote('funding', funding === 'bullish' ? 1 : -1, `funding ${funding}`));
+
+  const net = votes.reduce((sum, item) => sum + item.weight * item.direction, 0);
+  const totalWeight = votes.reduce((sum, item) => sum + item.weight, 0);
+  const consensus = totalWeight > 0 ? net / totalWeight : 0;
+  const confidence = Math.min(100, Math.max(0, Math.round(Math.abs(consensus) * 100)));
+  const direction = net > 0 ? 'bullish' : net < 0 ? 'bearish' : 'neutral';
+  const bulls = votes.filter(item => item.direction > 0);
+  const bears = votes.filter(item => item.direction < 0);
+  const agreeing = direction === 'bullish' ? bulls.length : direction === 'bearish' ? bears.length : 0;
+  const signals = Object.fromEntries(votes.map(item => [item.name, item.detail]));
+
+  return { confidence, direction, agreeing, votes, signals, score: net, atr: atrValue, last };
 }

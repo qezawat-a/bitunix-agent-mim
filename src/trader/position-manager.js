@@ -78,8 +78,12 @@ export class PositionManager {
   computeTPSL(entryPrice, direction, atr, confidence) {
     if (!finitePositive(entryPrice)) throw new Error('entryPrice must be positive');
     if (!['bullish', 'bearish'].includes(direction)) throw new Error('direction must be bullish or bearish');
-    const normalizedConfidence = finitePositive(confidence) ? Number(confidence) : 0;
-    const mult = Math.max(1, Math.min(3, normalizedConfidence / 40));
+    // Signal strength is the committee consensus, 0-100. A weak read takes the
+    // bare ATR distance; a unanimous read takes three times it. There are no
+    // min/max levels to configure: the exchange pair's own precision trims
+    // whatever comes out.
+    const strength = Math.min(100, Math.max(0, Number(confidence) || 0)) / 100;
+    const mult = 1 + strength * 2;
     const atrDist = this.getAtr(entryPrice, atr) * mult;
     const tpDist = atrDist * 1.5;
     const slDist = atrDist * 1.2;
@@ -103,7 +107,6 @@ export class PositionManager {
 
   async placeTPSL(positionId, entryPrice, direction, atr, confidence) {
     const levels = this.computeTPSL(entryPrice, direction, atr, confidence);
-    if (this.settings.dry_run) return { dryRun: true, action: 'placeTPSL', positionId, ...levels };
     return this.client.placeTPSL({
       symbol: this.symbol,
       positionId,
@@ -121,10 +124,34 @@ export class PositionManager {
     return ((mark - entry) / entry) * 100 * direction * leverage;
   }
 
+  // Profit or loss in the margin coin, from the position's own entry and mark.
+  unrealizedPnl(position) {
+    const entry = Number(position.avgPrice);
+    const mark = Number(position.markPrice);
+    const size = Number(position.size ?? position.qty);
+    if (!finitePositive(entry) || !finitePositive(mark) || !finitePositive(size)) return null;
+    const direction = position.side === 'BUY' ? 1 : position.side === 'SELL' ? -1 : 0;
+    if (!direction) return null;
+    return (mark - entry) * size * direction;
+  }
+
   currentStop(position) {
     const value = position.slPrice ?? position.stopPrice ?? position.stopLossPrice;
     const stop = Number(value);
     return finitePositive(stop) ? stop : null;
+  }
+
+  currentTakeProfit(position) {
+    const value = position.tpPrice ?? position.takeProfitPrice ?? position.tpTriggerPrice;
+    const target = Number(value);
+    return finitePositive(target) ? target : null;
+  }
+
+  // A take-profit counts as protection. Bitunix's position TP/SL endpoint
+  // replaces the whole pair, so treating a TP-only position as unprotected
+  // overwrote a take-profit that was set by hand.
+  hasProtection(position) {
+    return Boolean(this.currentStop(position) || this.currentTakeProfit(position));
   }
 
   shouldTighten(position, candidate) {
@@ -147,7 +174,6 @@ export class PositionManager {
   }
 
   async moveSLToEntry(positionId, entryPrice) {
-    if (this.settings.dry_run) return { dryRun: true, action: 'moveSLToEntry', positionId, slPrice: formatPrice(entryPrice) };
     return this.client.modifyTPSL({
       symbol: this.symbol,
       positionId,
@@ -172,7 +198,6 @@ export class PositionManager {
   }
 
   async updateTrailingSL(positionId, newSL) {
-    if (this.settings.dry_run) return { dryRun: true, action: 'updateTrailingSL', positionId, slPrice: formatPrice(newSL) };
     return this.client.modifyTPSL({
       symbol: this.symbol,
       positionId,
@@ -184,19 +209,31 @@ export class PositionManager {
 
   async checkLiquidationGuard(position) {
     const mark = Number(position.markPrice);
+    const entry = Number(position.avgPrice);
     const liq = Number(position.liqPrice);
     if (!finitePositive(mark)) throw new Error('liquidation guard requires a mark price');
     if (position.liqPrice === undefined || position.liqPrice === null || position.liqPrice === '') throw new Error('liquidation guard requires a liquidation price');
     if (!Number.isFinite(liq) || liq <= 0) return { skipped: 'no active liquidation price' };
-    const distance = Math.abs(mark - liq) / mark;
-    if (distance >= Number(this.settings.sl_liquidation_safety) / 100) return { skipped: 'liquidation distance safe' };
+    if (!finitePositive(entry)) return { skipped: 'liquidation guard requires an entry price' };
+    // sl_liquidation_safety is a fraction (0.01-1) of the room to liquidation,
+    // not a percentage, so it is compared as-is.
+    const room = Math.abs(entry - liq) / entry;
+    if (!finitePositive(room)) return { skipped: 'liquidation price sits at entry' };
+    const direction = position.side === 'BUY' ? 1 : position.side === 'SELL' ? -1 : 0;
+    if (!direction) return { skipped: 'position has no side to judge against' };
+    // Negative while the trade is in profit, so only a loss counts against it.
+    const adverse = -(((mark - entry) / entry) * direction);
+    const givenBack = Math.min(1, Math.max(0, adverse) / room);
+    const safety = Number(this.settings.sl_liquidation_safety);
+    if (givenBack < safety) {
+      return { skipped: `liquidation room intact, ${Math.round(givenBack * 100)}% of ${Math.round(safety * 100)}% given back` };
+    }
     this.state.cooldownUntil = Date.now() + Number(this.settings.cooldown_minutes) * 60000;
-    if (this.settings.dry_run) return { dryRun: true, action: 'closePosition', positionId: position.positionId };
     return this.client.closePosition(this.symbol, position.positionId, position);
   }
 
   async ensureProtection(position) {
-    if (this.currentStop(position)) return { skipped: 'protection already present' };
+    if (this.hasProtection(position)) return { skipped: 'protection already present' };
     const key = String(position.positionId);
     const lastAttempt = this.protectionAttempts.get(key) || 0;
     if (Date.now() - lastAttempt < 60000) return { skipped: 'protection retry pending' };
@@ -204,17 +241,18 @@ export class PositionManager {
     const direction = position.side === 'BUY' ? 'bullish' : position.side === 'SELL' ? 'bearish' : null;
     if (!direction) throw new Error(`position ${key} has an invalid side for TP/SL`);
     try {
-      if (!this.settings.dry_run) {
-        const pendingData = await this.client.getPendingTPSL(this.symbol);
-        const pending = strictListFromData(pendingData, ['orderList']);
-        if (!pending) throw new Error('pending TP/SL response must contain an array');
-        const existing = pending.find(item => String(item.positionId) === key && finitePositive(item.slPrice ?? item.stopPrice));
-        if (existing) return { verified: true, result: existing };
-      }
+      const pendingData = await this.client.getPendingTPSL(this.symbol);
+      const pending = strictListFromData(pendingData, ['orderList']);
+      if (!pending) throw new Error('pending TP/SL response must contain an array');
+      // Any take-profit or stop already registered against this position is
+      // left exactly as it is; the position TP/SL endpoint would replace it.
+      const existing = pending.find(item => String(item.positionId) === key
+        && (finitePositive(item.tpPrice ?? item.takeProfitPrice) || finitePositive(item.slPrice ?? item.stopPrice)));
+      if (existing) return { verified: true, result: existing };
       const result = await this.placeTPSL(position.positionId, Number(position.avgPrice), direction, position.atr, this.settings.min_confidence);
       return { placed: true, result };
     } catch (error) {
-      if (this.settings.on_tpsl_failure === 'close' && !this.settings.dry_run) {
+      if (this.settings.on_tpsl_failure === 'close') {
         const closeResult = await this.client.closePosition(this.symbol, position.positionId, position);
         return { closed: true, result: closeResult, error: error.message };
       }

@@ -1,4 +1,5 @@
 import { CONFIG } from '../config.js';
+import { STRATEGY_WEIGHTS } from '../bitunix/indicators.js';
 
 export const DEFAULTS = {
   symbol: 'BTCUSDT',
@@ -28,8 +29,6 @@ export const DEFAULTS = {
   mid_manage_interval_sec: 15,
   order_unit: 'cost',
   position_sizing_margin_pct: 2,
-  dry_run: true,
-  auto_trade: false,
 };
 
 export const ALIASES = {
@@ -44,8 +43,6 @@ export const ALIASES = {
   min_conf: 'min_confidence',
   cooldown: 'cooldown_minutes',
   unit: 'order_unit',
-  dryrun: 'dry_run',
-  autotrade: 'auto_trade',
 };
 
 export const SETTING_KEYS = Object.freeze(Object.keys(DEFAULTS));
@@ -94,7 +91,7 @@ const NUMBER_KEYS = new Set([
   'mid_manage_interval_sec',
   'position_sizing_margin_pct',
 ]);
-const BOOLEAN_KEYS = new Set(['dry_run', 'auto_trade', 'reversal_enabled']);
+const BOOLEAN_KEYS = new Set(['reversal_enabled']);
 const ENUMS = {
   position_type: ['crossed', 'isolated'],
   position_mode: ['hedge', 'one-way'],
@@ -222,8 +219,8 @@ export function validateSettings(s) {
       errors.push('timeframes must contain values like 1m, 5m, 15m, 1h, or 1d');
     }
     if (new Set(s.timeframes).size !== s.timeframes.length) errors.push('timeframes must be unique');
-    if (validNumber(s.min_agreeing_strategies) && s.min_agreeing_strategies > s.timeframes.length) {
-      errors.push('min_agreeing_strategies cannot exceed timeframe count');
+    if (validNumber(s.min_agreeing_strategies) && s.min_agreeing_strategies > Object.keys(STRATEGY_WEIGHTS).length) {
+      errors.push('min_agreeing_strategies cannot exceed the number of strategies on the committee');
     }
   }
 
@@ -237,8 +234,6 @@ export function getTraderSettings(source = CONFIG) {
 export function getPersistentSettings(source = CONFIG) {
   const settings = getTraderSettings(source);
   delete settings.symbol;
-  delete settings.dry_run;
-  delete settings.auto_trade;
   return settings;
 }
 
@@ -260,8 +255,6 @@ export function applyPersistedSettings(target, stored) {
   }
   const normalized = normalizePatch(filtered);
   delete normalized.symbol;
-  delete normalized.dry_run;
-  delete normalized.auto_trade;
   const next = { ...getTraderSettings(target), ...normalized };
   const errors = validateSettings(next);
   if (errors.length) throw new Error(`invalid persisted settings: ${errors.join('; ')}`);

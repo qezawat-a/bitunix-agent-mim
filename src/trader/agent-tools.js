@@ -45,7 +45,6 @@ export const traderTools = [
       required: ['key', 'value'],
     },
     async handler({ key, value }) {
-      if (key === 'dry_run' || key === 'auto_trade') throw new Error('safety switches require an authenticated command');
       if (key === 'symbol' && String(value).toUpperCase() !== CONFIG.symbol) {
         const client = requireClient();
         const positions = await client.getPendingPositions(CONFIG.symbol);
@@ -91,14 +90,38 @@ export const traderTools = [
         tradeSide: 'OPEN',
         reduceOnly: false,
       };
-      if (CONFIG.dry_run) {
-        markCooldown();
-        return { dryRun: true, params };
-      }
       const order = await client.placeOrder(params);
       markCooldown();
       if (sharedTrader?.reconcilePositions) await sharedTrader.reconcilePositions();
       return { order };
+    },
+  },
+  {
+    name: 'trader_open_from_signal',
+    description: 'Open a position from a scanner signal, sizing TP/SL from the signal confidence and ATR. Prefer this over trader_open_position when acting on a signal.',
+    parameters: {
+      type: 'object',
+      properties: {
+        symbol: { type: 'string' },
+        direction: { type: 'string', enum: ['bullish', 'bearish'] },
+        entryPrice: { type: 'string' },
+        confidence: { type: 'number' },
+        atr: { type: 'number' },
+      },
+      required: ['symbol', 'direction', 'entryPrice'],
+    },
+    async handler({ symbol, direction, entryPrice, confidence, atr }) {
+      if (!sharedTrader) throw new Error('Trader not ready');
+      const normalizedSymbol = String(symbol).toUpperCase();
+      if (normalizedSymbol !== CONFIG.symbol) throw new Error(`this bot trades ${CONFIG.symbol}, not ${normalizedSymbol}`);
+      const order = await sharedTrader.openPosition(
+        normalizedSymbol,
+        Number(entryPrice),
+        direction,
+        Number.isFinite(Number(atr)) ? Number(atr) : null,
+        Number.isFinite(Number(confidence)) ? Number(confidence) : null,
+      );
+      return { order, direction, confidence: confidence ?? CONFIG.min_confidence };
     },
   },
   {
@@ -115,10 +138,6 @@ export const traderTools = [
     async handler({ symbol, positionId }) {
       const client = requireClient();
       const normalizedSymbol = String(symbol).toUpperCase();
-      if (CONFIG.dry_run) {
-        markCooldown();
-        return { dryRun: true, symbol: normalizedSymbol, positionId };
-      }
       const result = await client.closePosition(normalizedSymbol, positionId);
       markCooldown();
       return { result };
@@ -131,10 +150,6 @@ export const traderTools = [
     async handler({ symbol }) {
       const client = requireClient();
       const normalizedSymbol = String(symbol).toUpperCase();
-      if (CONFIG.dry_run) {
-        markCooldown();
-        return { dryRun: true, symbol: normalizedSymbol };
-      }
       const result = await client.closeAllPosition(normalizedSymbol);
       markCooldown();
       return { result };
@@ -147,7 +162,6 @@ export const traderTools = [
     async handler({ symbol, leverage }) {
       const client = requireClient();
       const normalizedSymbol = String(symbol).toUpperCase();
-      if (CONFIG.dry_run) return { dryRun: true, symbol: normalizedSymbol, leverage };
       const result = await client.changeLeverage(normalizedSymbol, leverage);
       if (normalizedSymbol === CONFIG.symbol) applySettings(CONFIG, { leverage });
       return result;
@@ -160,30 +174,9 @@ export const traderTools = [
     async handler({ symbol, marginMode }) {
       const client = requireClient();
       const normalizedSymbol = String(symbol).toUpperCase();
-      if (CONFIG.dry_run) return { dryRun: true, symbol: normalizedSymbol, marginMode };
       const result = await client.changeMarginMode(normalizedSymbol, marginMode);
       if (normalizedSymbol === CONFIG.symbol) applySettings(CONFIG, { position_type: marginMode });
       return result;
-    },
-  },
-  {
-    name: 'trader_set_dry_run',
-    description: 'Enable dry-run mode; live mode requires an authenticated Telegram command',
-    parameters: { type: 'object', properties: { enabled: { type: 'boolean' } }, required: ['enabled'] },
-    async handler({ enabled }) {
-      if (!enabled) throw new Error('live mode cannot be enabled through an LLM tool');
-      CONFIG.dry_run = true;
-      return { ok: true, dry_run: true };
-    },
-  },
-  {
-    name: 'trader_set_auto_trade',
-    description: 'Disable autonomous trading; enabling requires an authenticated Telegram command',
-    parameters: { type: 'object', properties: { enabled: { type: 'boolean' } }, required: ['enabled'] },
-    async handler({ enabled }) {
-      if (enabled) throw new Error('auto-trade cannot be enabled through an LLM tool');
-      CONFIG.auto_trade = false;
-      return { ok: true, auto_trade: false };
     },
   },
   {
