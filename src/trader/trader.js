@@ -373,7 +373,7 @@ export class Trader {
     return number.toFixed(decimals);
   }
 
-  async report({ lastSignal = null } = {}) {
+  async report({ lastSignal = null, scanOn = true, stoppedReason = null } = {}) {
     const now = Date.now();
     if (now < this.state.lastReport + CONFIG.report_interval_sec * 1000) return null;
     this.state.lastReport = now;
@@ -394,6 +394,14 @@ export class Trader {
       lines.push(`last scan ${escText(this.state.lastScan)}`);
     } else {
       lines.push('signal <b>waiting for first scan</b>');
+    }
+    // A stopped scan is a real condition the user must be able to see: without
+    // the reason, the report above reads like an idle bot rather than a halted
+    // one, and nothing else surfaces it.
+    if (!scanOn) {
+      lines.push(`<b>scanning is OFF</b>${stoppedReason ? ` — ${escText(stoppedReason)}` : ' — send /scan on to resume'}`);
+    } else if (stoppedReason) {
+      lines.push(`<b>last scan failed</b> — ${escText(stoppedReason)}`);
     }
     if (lastSignal?.blockedBy?.length) lines.push(`blocked: ${escText(lastSignal.blockedBy.join(', '))}`);
 

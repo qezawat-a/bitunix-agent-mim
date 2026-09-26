@@ -88,6 +88,10 @@ async function main() {
     await trader.syncAccountSettings({ apply: true });
   } catch (error) {
     scanState.scanOn = false;
+    // A failed account check stops the scan, but the report keeps sending, so a
+    // silent console line leaves the user reading "waiting for first scan"
+    // forever with no idea why. The reason has to travel with the report.
+    scanState.scanStoppedReason = `account settings check failed: ${error.message}`;
     console.error('[safety] account settings verification failed, scanning stopped:', error.message);
   }
 
@@ -178,10 +182,11 @@ async function main() {
     try {
       const signal = scanState.scanOn ? await trader.scanCycle() : null;
       if (signal) lastSignal = signal;
+      if (scanState.scanOn && signal) scanState.scanStoppedReason = null;
       await trader.guard();
       await trader.midManage();
       if (reportState.reportOn) {
-        const report = await trader.report({ lastSignal });
+        const report = await trader.report({ lastSignal, scanOn: scanState.scanOn, stoppedReason: scanState.scanStoppedReason });
         if (report && CONFIG.ALLOWED_USER_ID) await sendMessage(CONFIG.ALLOWED_USER_ID, report);
       }
       if (signal?.reversals?.length && CONFIG.ALLOWED_USER_ID) {
@@ -190,6 +195,7 @@ async function main() {
         }
       }
     } catch (error) {
+      scanState.scanStoppedReason = `scan error: ${error.message}`;
       console.error('loop error:', error.message);
     } finally {
       if (!stopping) scanTimer = setTimeout(runScanCycle, Math.max(1000, CONFIG.scan_interval_sec * 1000));

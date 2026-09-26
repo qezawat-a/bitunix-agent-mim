@@ -514,6 +514,32 @@ describe('exchange safety', () => {
     assert.doesNotMatch(report, /waiting for first scan/);
   });
 
+  it('says the scan is off and why, instead of looking idle', async () => {
+    // syncAccountSettings throws → main.js sets scanOn = false and only logs it.
+    // The report keeps sending, so the user saw "waiting for first scan" for
+    // hours with no indication the bot had halted. A stopped scan must be
+    // visible in the report itself.
+    const client = { getPendingPositions: async () => [], getTickers: async () => [] };
+    const trader = new Trader(client);
+    trader.positionManager = new PositionManager(client, 'BTCUSDT', { ...getTraderSettings(CONFIG) });
+    Object.assign(CONFIG, { symbol: 'BTCUSDT', report_interval_sec: 30 });
+    trader.state.lastReport = 0;
+    const report = await trader.report({ lastSignal: null, scanOn: false, stoppedReason: 'account settings check failed: 403 forbidden' });
+    assert.match(report, /scanning is OFF/);
+    assert.match(report, /account settings check failed: 403 forbidden/);
+  });
+
+  it('surfaces a per-tick scan error', async () => {
+    const client = { getPendingPositions: async () => [], getTickers: async () => [] };
+    const trader = new Trader(client);
+    trader.positionManager = new PositionManager(client, 'BTCUSDT', { ...getTraderSettings(CONFIG) });
+    Object.assign(CONFIG, { symbol: 'BTCUSDT', report_interval_sec: 30 });
+    trader.state.lastReport = 0;
+    const report = await trader.report({ lastSignal: null, scanOn: true, stoppedReason: 'scan error: invalid 15m kline response for BTCUSDT' });
+    assert.match(report, /last scan failed/);
+    assert.match(report, /invalid 15m kline response/);
+  });
+
   it('trims the price to the precision of the pair being reported', async () => {
     // The price shown must be trimmed with the *displayed* pair's rules. Reading
     // them from CONFIG instead made a report about one pair render another's
@@ -1290,6 +1316,36 @@ describe('telegram command routing', () => {
     assert.equal(await handleCommand(message, '/set order_unit by position size'), true);
     assert.equal(CONFIG.order_unit, 'position_size');
     assert.ok(telegramRequests.some(item => item.url.endsWith('/sendMessage') && String(item.body.text).includes('echo:hello')));
+  });
+
+  it('refuses to resume scanning when the account check still fails', async () => {
+    // /scan on must re-verify leverage and margin mode. Resuming without it
+    // would trade on settings nobody checked, which is the exact risk the boot
+    // check exists to prevent.
+    Object.assign(CONFIG, { ALLOWED_USER_ID: '42', TELEGRAM_BOT_TOKEN: 'test-token' });
+    const sent = [];
+    globalThis.fetch = async (url, options) => {
+      sent.push({ url, body: options.body ? JSON.parse(options.body) : null });
+      return { ok: true, json: async () => ({ ok: true }), text: async () => '' };
+    };
+    const calls = [];
+    const trader = {
+      syncAccountSettings: async ({ apply }) => {
+        calls.push(apply);
+        throw new Error('exchange leverage 20 does not match configured leverage 10');
+      },
+    };
+    const agent = { memory: { all: () => ({}) }, say: async () => ({ content: 'ok' }) };
+    const { handleCommand, scanState } = createTraderCommands({ client: {}, scanner: {}, trader, agent, agentState: { autonomous: false } });
+    const message = { chat: { id: 42 }, from: { id: 42 } };
+    // The boot-time account check failed, so scanning is off — reproduce that.
+    scanState.scanOn = false;
+    assert.equal(await handleCommand(message, '/scan on'), true);
+    // The account check must be re-run, and its failure reported, rather than
+    // silently re-enabling a scan on unverified leverage and margin mode.
+    assert.deepEqual(calls, [true]);
+    const texts = sent.filter(item => item.url.endsWith('/sendMessage')).map(item => String(item.body.text));
+    assert.ok(texts.some(text => /Cannot resume scanning/.test(text) && /exchange leverage 20/.test(text)), `no refusal sent: ${JSON.stringify(texts)}`);
   });
 
   it('names the real setting when the key is misspelled', async () => {

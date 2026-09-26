@@ -173,7 +173,20 @@ export function createTraderCommands({ client, scanner, trader, agent, agentStat
           return true;
         }
         case 'scan': {
-          scanState.scanOn = parseBoolean(arg, !scanState.scanOn, 'scan');
+          const next = parseBoolean(arg, !scanState.scanOn, 'scan');
+          if (next && !scanState.scanOn) {
+            // Boot stops scanning when the account settings check fails. Turning
+            // it back on must re-run that check, or the bot would resume trading
+            // on leverage and margin mode nobody has verified.
+            try {
+              await trader.syncAccountSettings({ apply: true });
+              scanState.scanStoppedReason = null;
+            } catch (error) {
+              scanState.scanStoppedReason = `account settings check failed: ${error.message}`;
+              return usage(chatId, `Cannot resume scanning: ${esc(error.message)}`);
+            }
+          }
+          scanState.scanOn = next;
           await sendMessage(chatId, `scan <code>${scanState.scanOn ? 'on' : 'off'}</code>`);
           return true;
         }
