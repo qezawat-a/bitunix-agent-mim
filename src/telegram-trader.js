@@ -1,7 +1,7 @@
 import { CONFIG, parseBoolean } from './config.js';
 import { strictListFromData } from './bitunix/client.js';
 import { sendMessage, isOwner, esc, formatSignalReport } from './telegram-bot.js';
-import { applySettings, canonicalSettingKey, getTraderSettings, parseSettingValue, validateSettings } from './trader/settings.js';
+import { applySettings, canonicalSettingKey, getTraderSettings, parseSettingValue, unknownSettingError, validateSettings } from './trader/settings.js';
 import { parseThinkingLevel } from './agent/thinking.js';
 import { primaryProviderName, providerKeyVar, providerModelVar } from './agent/config.js';
 import { listAnthropicModels, listGeminiModels, listOpenAiModels, resetOpenAiModelCache, describeModelConfig } from './agent/brain.js';
@@ -123,8 +123,10 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
         }
         case 'get': {
           const settings = getTraderSettings(CONFIG);
-          const key = rest[0];
-          if (!key || !Object.hasOwn(settings, key)) return usage(chatId, 'Unknown setting.');
+          const rawKey = rest[0];
+          if (!rawKey) return usage(chatId, 'Usage: /get key');
+          const key = canonicalSettingKey(rawKey);
+          if (!Object.hasOwn(settings, key)) return usage(chatId, unknownSettingError(rawKey).message);
           await sendMessage(chatId, `<code>${esc(key)}</code> = <code>${esc(String(settings[key]))}</code>`);
           return true;
         }
