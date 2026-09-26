@@ -8,12 +8,20 @@ class Scanner {
     this.client = client;
   }
 
+  // Exchange kline responses are not guaranteed oldest-first, and every
+  // indicator here assumes chronological order (closes[length-1] must be the
+  // newest close, or EMA/RSI/MACD read the series backwards). Sorting by open
+  // time makes the order explicit instead of relying on the API.
+  static orderKlines(klines) {
+    return [...klines].sort((a, b) => Number(a.openTime ?? a.time ?? a.ctime ?? 0) - Number(b.openTime ?? b.time ?? b.ctime ?? 0));
+  }
+
   async getKlinesFor(symbol, timeframes) {
     const output = {};
     for (const timeframe of timeframes) {
       const klines = await this.client.getKlines(symbol, timeframe, 200);
       if (!Array.isArray(klines) || klines.length < 60) throw new Error(`invalid ${timeframe} kline response for ${symbol}`);
-      output[timeframe] = klines;
+      output[timeframe] = Scanner.orderKlines(klines);
     }
     return output;
   }

@@ -472,6 +472,30 @@ describe('exchange safety', () => {
     assert.match(report, /waiting for first scan/);
   });
 
+  it('sorts klines by open time so the newest close is last', async () => {
+    // Bitunix does not promise chronological order, and every indicator here
+    // reads closes[length-1] as the newest close. Reversed input must still
+    // report the newest price, not the oldest.
+    const ascending = Array.from({ length: 60 }, (_, index) => ({
+      openTime: 1000 + index * 60,
+      close: String(100 + index),
+      high: String(101 + index),
+      low: String(99 + index),
+      baseVol: '10',
+    }));
+    const reversed = [...ascending].reverse();
+    const client = {
+      getKlines: async () => reversed,
+      getFundingRate: async () => ({ value: 0 }),
+      getSymbolRules: async () => ({ basePrecision: 2, quotePrecision: 2, minTradeVolume: 0 }),
+    };
+    const scanner = new Scanner(client);
+    Object.assign(CONFIG, { timeframes: ['1m'], tf_min_confidence: 0, min_confidence: 99 });
+    const result = await scanner.scan('BTCUSDT');
+    // Newest candle is 100+59 = 159, regardless of input order.
+    assert.equal(result.lastPrice, 159);
+  });
+
   it('trims the scanned price to the pair quotePrecision', async () => {
     const klines = Array.from({ length: 60 }, (_, index) => ({ close: '0.104712345', high: '0.105', low: '0.104', baseVol: '10' }));
     const client = {
