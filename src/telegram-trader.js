@@ -1,7 +1,7 @@
 import { CONFIG, parseBoolean } from './config.js';
 import { strictListFromData } from './bitunix/client.js';
 import { sendMessage, isOwner, esc, formatSignalReport } from './telegram-bot.js';
-import { applySettings, getTraderSettings, parseSettingValue, validateSettings } from './trader/settings.js';
+import { applySettings, canonicalSettingKey, getTraderSettings, parseSettingValue, validateSettings } from './trader/settings.js';
 import { parseThinkingLevel } from './agent/thinking.js';
 import { primaryProviderName, providerKeyVar, providerModelVar } from './agent/config.js';
 import { listAnthropicModels, listGeminiModels, listOpenAiModels, resetOpenAiModelCache, describeModelConfig } from './agent/brain.js';
@@ -31,6 +31,30 @@ function parseHarnessInput(text) {
 
 function markCooldown(trader) {
   if (trader?.state) trader.state.cooldownUntil = Date.now() + Number(CONFIG.cooldown_minutes) * 60000;
+}
+
+// A regex error ("must be 5-32 letters") is useless when the real problem is that
+// the pair is not traded on Bitunix. Ask the exchange and name a real pair instead.
+async function checkSymbolListed(client, symbol) {
+  const wanted = String(symbol || '').trim().toUpperCase().replace(/[_\-\s]/g, '');
+  if (!wanted) return { ok: false, message: 'Usage: /set symbol BTCUSDT' };
+  let pairs = [];
+  try {
+    const data = await client.getTradingPairs();
+    pairs = (Array.isArray(data) ? data : []).map(pair => String(pair?.symbol || '').toUpperCase()).filter(Boolean);
+  } catch {
+    return { ok: true, symbol: wanted }; // exchange unreachable — do not block the change
+  }
+  if (!pairs.length) return { ok: true, symbol: wanted };
+  if (pairs.includes(wanted)) return { ok: true, symbol: wanted };
+
+  // "RARE_USDT" -> look for RAREUSDT, and for the closest real pair either way.
+  const base = wanted.replace(/(USDT|USDC|BUSD)$/, '');
+  const attempts = [wanted, `${base}USDT`, base];
+  const close = attempts.map(candidate => pairs.find(pair => pair === candidate)).find(Boolean);
+  const near = pairs.find(pair => pair.startsWith(base.slice(0, 4)) && base.length >= 4);
+  const hint = close ? `did you mean ${close}?` : near ? `the closest listed pairs are ${near}${base.startsWith(near) ? '…' : ''}.` : 'send /pairs to see what Bitunix lists.';
+  return { ok: false, message: `${wanted} is not traded on Bitunix USDT-M — ${hint}` };
 }
 
 export function createTraderCommands({ client, scanner, trader, agent, loadSession = null, saveSession = null, mcpServers = [], getMcpTools = () => [], reloadMcpTools = null }) {
@@ -83,6 +107,10 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
               return usage(chatId, 'order_unit accepts cost (Cost Value: cost × leverage ÷ price), qty (Quantity Value: explicit quantity), or position_size (Nominal Value: nominal ÷ price, leverage-independent).');
             }
           }
+          if (key === 'symbol') {
+            const check = await checkSymbolListed(client, parts.join(''));
+            if (!check.ok) return usage(chatId, check.message);
+          }
           const value = parseSettingValue(key, parts.join(' '));
           if (key === 'symbol' && String(value).toUpperCase() !== CONFIG.symbol) {
             const positions = await client.getPendingPositions(CONFIG.symbol);
@@ -90,7 +118,7 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
             if (!positionList || positionList.length) return usage(chatId, 'Cannot change symbol while positions are open.');
           }
           applySettings(CONFIG, { [key]: value });
-          await sendMessage(chatId, `Set <code>${esc(key)}</code> = <code>${esc(String(value))}</code>`);
+          await sendMessage(chatId, `Set <code>${esc(canonicalSettingKey(key))}</code> = <code>${esc(String(value))}</code>`);
           return true;
         }
         case 'get': {
@@ -190,8 +218,10 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
         }
         case 'symbol': {
           if (!arg) return usage(chatId, 'Usage: /symbol BTCUSDT');
-          const symbol = arg.toUpperCase();
-          if (!/^[A-Z0-9]{5,32}$/.test(symbol)) return usage(chatId, 'Invalid symbol.');
+          const check = await checkSymbolListed(client, arg);
+          if (!check.ok) return usage(chatId, check.message);
+          const symbol = check.symbol;
+          if (!/^[A-Z0-9]{5,32}$/.test(symbol)) return usage(chatId, `${symbol} is not a valid pair name.`);
           const positions = await client.getPendingPositions(CONFIG.symbol);
           const positionList = strictListFromData(positions);
           if (!positionList || positionList.length) return usage(chatId, 'Cannot change symbol while positions are open.');

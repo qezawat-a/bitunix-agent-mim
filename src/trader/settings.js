@@ -36,11 +36,40 @@ export const ALIASES = {
   margin_mode: 'position_type',
   position_type: 'position_type',
   symbol: 'symbol',
+  pair: 'symbol',
   leverage: 'leverage',
+  // timeframes is plural everywhere else, so the singular is the common typo.
+  timeframe: 'timeframes',
+  tf: 'timeframes',
+  min_conf: 'min_confidence',
+  cooldown: 'cooldown_minutes',
+  unit: 'order_unit',
+  dryrun: 'dry_run',
+  autotrade: 'auto_trade',
 };
 
 export const SETTING_KEYS = Object.freeze(Object.keys(DEFAULTS));
 const SETTING_KEY_SET = new Set(SETTING_KEYS);
+
+// "unknown setting: timeframe " is a dead end, so the closest real key is named.
+export function suggestSettingKey(input) {
+  const key = String(input || '').trim().toLowerCase();
+  if (!key) return null;
+  let best = null;
+  let bestScore = Infinity;
+  for (const candidate of [...SETTING_KEY_SET, ...Object.keys(ALIASES)]) {
+    const score = editDistance(key, candidate);
+    if (score < bestScore) { bestScore = score; best = candidate; }
+  }
+  const limit = Math.max(2, Math.floor(key.length / 3));
+  return best && bestScore <= limit ? (ALIASES[best] || best) : null;
+}
+
+export function unknownSettingError(input) {
+  const suggestion = suggestSettingKey(input);
+  const key = String(input || '').trim();
+  return new Error(`unknown setting: ${key}${suggestion ? ` — did you mean ${suggestion}?` : ' — send /settings to see the list'}`);
+}
 const INTEGER_KEYS = new Set([
   'leverage',
   'min_agreeing_strategies',
@@ -77,8 +106,27 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function editDistance(a, b) {
+  let previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const current = [i];
+    for (let j = 1; j <= b.length; j++) {
+      current[j] = Math.min(
+        previous[j] + 1,
+        current[j - 1] + 1,
+        previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    previous = current;
+  }
+  return previous[b.length];
+}
+
 function normalizeValue(key, value) {
-  if (key === 'symbol') return String(value).trim().toUpperCase();
+  if (key === 'symbol') {
+    // Bitunix writes pairs with no separator: RAREUSDT, never RARE_USDT.
+    return String(value).trim().toUpperCase().replace(/[_\-\s]/g, '');
+  }
   if (key === 'timeframes') {
     const values = Array.isArray(value) ? value : String(value).split(',');
     return [...new Set(values.map(item => String(item).trim().toLowerCase()).filter(Boolean))];
@@ -100,7 +148,7 @@ function normalizePatch(input) {
   const out = {};
   for (const [inputKey, value] of Object.entries(input)) {
     const key = ALIASES[inputKey] || inputKey;
-    if (!SETTING_KEY_SET.has(key)) throw new Error(`unknown setting: ${inputKey}`);
+    if (!SETTING_KEY_SET.has(key)) throw unknownSettingError(inputKey);
     if (Object.hasOwn(out, key)) throw new Error(`duplicate setting: ${key}`);
     out[key] = normalizeValue(key, value);
   }
@@ -221,9 +269,14 @@ export function applyPersistedSettings(target, stored) {
   return getTraderSettings(target);
 }
 
+export function canonicalSettingKey(input) {
+  const key = String(input || '').trim();
+  return ALIASES[key] || key;
+}
+
 export function parseSettingValue(key, raw) {
   const canonical = ALIASES[key] || key;
-  if (!SETTING_KEY_SET.has(canonical)) throw new Error(`unknown setting: ${key}`);
+  if (!SETTING_KEY_SET.has(canonical)) throw unknownSettingError(key);
   if (BOOLEAN_KEYS.has(canonical)) {
     const normalized = String(raw).trim().toLowerCase();
     if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;

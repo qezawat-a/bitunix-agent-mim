@@ -912,6 +912,53 @@ describe('telegram command routing', () => {
     assert.equal(CONFIG.order_unit, 'position_size');
     assert.ok(telegramRequests.some(item => item.url.endsWith('/sendMessage') && String(item.body.text).includes('echo:hello')));
   });
+
+  it('names the real setting when the key is misspelled', async () => {
+    Object.assign(CONFIG, { ALLOWED_USER_ID: '42', TELEGRAM_BOT_TOKEN: 'test-token' });
+    const sent = [];
+    globalThis.fetch = async (url, options) => {
+      sent.push({ url, body: options.body ? JSON.parse(options.body) : null });
+      return { ok: true, json: async () => ({ ok: true }), text: async () => '' };
+    };
+    const agent = { memory: { all: () => ({}), remember: async () => {} }, say: async () => ({ content: 'ok' }) };
+    const { handleCommand } = createTraderCommands({ client: {}, scanner: {}, trader: {}, agent });
+    const message = { chat: { id: 42 }, from: { id: 42 } };
+
+    // "timeframe" is the singular; the setting is "timeframes".
+    assert.equal(await handleCommand(message, '/set timeframe 1m,3m,5m,15m'), true);
+    assert.deepEqual(CONFIG.timeframes, ['1m', '3m', '5m', '15m']);
+    assert.ok(sent.some(item => String(item.body?.text).includes('Set <code>timeframes</code>')));
+
+    // A key with no near match still says what to do instead of just "unknown".
+    assert.equal(await handleCommand(message, '/set zzzqqq 1'), true);
+    assert.ok(sent.some(item => String(item.body?.text).includes('/settings to see the list')));
+  });
+
+  it('tells the truth about a pair Bitunix does not list', async () => {
+    Object.assign(CONFIG, { ALLOWED_USER_ID: '42', TELEGRAM_BOT_TOKEN: 'test-token' });
+    const sent = [];
+    globalThis.fetch = async (url, options) => {
+      sent.push({ url, body: options.body ? JSON.parse(options.body) : null });
+      return { ok: true, json: async () => ({ ok: true }), text: async () => '' };
+    };
+    // The real Bitunix list has 762 pairs and no underscore, e.g. RARE_USDT is
+    // not one of them, and RARE is not traded at all.
+    const client = {
+      getTradingPairs: async () => [{ symbol: 'BTCUSDT' }, { symbol: 'ETHUSDT' }, { symbol: 'RAREISLANDS' }],
+      getPendingPositions: async () => [],
+    };
+    const agent = { memory: { all: () => ({}), remember: async () => {} }, say: async () => ({ content: 'ok' }) };
+    const { handleCommand } = createTraderCommands({ client, scanner: {}, trader: {}, agent });
+    const message = { chat: { id: 42 }, from: { id: 42 } };
+
+    assert.equal(await handleCommand(message, '/set symbol RARE_USDT'), true);
+    assert.equal(CONFIG.symbol, 'BTCUSDT', 'an unlisted pair must not be applied');
+    assert.ok(sent.some(item => /RAREUSDT is not traded on Bitunix/.test(String(item.body?.text))), 'the real reason is reported, not a regex complaint');
+
+    // The underscore form of a pair that IS listed is accepted, not rejected.
+    assert.equal(await handleCommand(message, '/set symbol BTC_USDT'), true);
+    assert.equal(CONFIG.symbol, 'BTCUSDT');
+  });
 });
 
 describe('telegram formatting', () => {
