@@ -150,6 +150,38 @@ describe('safety configuration', () => {
     assert.equal(Object.hasOwn(target, 'BITUNIX_API_SECRET'), false);
   });
 
+  it('keeps good saved settings when one stored value is bad', () => {
+    // A saved store that grew an invalid value must not cost the user every
+    // other setting they chose.
+    const target = { ...getTraderSettings(CONFIG) };
+    const stored = {
+      symbol: 'BTCUSDT',
+      leverage: 25,
+      min_confidence: 90,
+      margin_amount_pct: 5,
+      cooldown_minutes: 7,
+      on_tpsl_failure: 'not-a-mode',
+      tf_min_confidence: 500, // out of range
+    };
+    applyPersistedSettings(target, stored);
+    assert.equal(target.leverage, 25);
+    assert.equal(target.min_confidence, 90);
+    assert.equal(target.margin_amount_pct, 5);
+    assert.equal(target.cooldown_minutes, 7);
+    // The two bad values fall back to the default instead of nuking the rest.
+    assert.equal(target.on_tpsl_failure, 'hold');
+    assert.equal(target.tf_min_confidence, getTraderSettings(CONFIG).tf_min_confidence);
+  });
+
+  it('reads a saved cancel/alert as hold', () => {
+    const target = { ...getTraderSettings(CONFIG) };
+    applyPersistedSettings(target, { on_tpsl_failure: 'cancel' });
+    assert.equal(target.on_tpsl_failure, 'hold');
+    const other = { ...getTraderSettings(CONFIG) };
+    applyPersistedSettings(other, { on_tpsl_failure: 'alert' });
+    assert.equal(other.on_tpsl_failure, 'hold');
+  });
+
   it('exposes only public settings and keeps secrets out of persistence', () => {
     CONFIG.BITUNIX_API_SECRET = 'secret-sentinel';
     const publicSettings = getTraderSettings(CONFIG);

@@ -43,7 +43,7 @@ async function main() {
     try {
       applyPersistedSettings(CONFIG, stored.settings);
     } catch (error) {
-      console.warn('[warn] ignoring invalid persisted settings:', error.message);
+      console.warn('[settings] could not restore saved settings:', error.message);
     }
   }
   await saveStore({ settings: getPersistentSettings(CONFIG) });

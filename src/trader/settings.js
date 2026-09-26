@@ -132,7 +132,12 @@ function normalizeValue(key, value) {
     if (['cost', 'notional'].includes(normalized)) return 'cost';
     return normalized;
   }
-  if (key === 'on_tpsl_failure') return String(value).trim().toLowerCase();
+  // cancel/alert were two spellings of the same non-action, now "hold". A saved
+  // store may still hold either, so they are read as hold rather than dropped.
+  if (key === 'on_tpsl_failure') {
+    const normalized = String(value).trim().toLowerCase();
+    return ['cancel', 'alert'].includes(normalized) ? 'hold' : normalized;
+  }
   return value;
 }
 
@@ -240,6 +245,8 @@ export function applySettings(target, patch) {
   return getTraderSettings(target);
 }
 
+// One stale or hand-edited value must not throw away every other saved setting.
+// Bad keys are reported and dropped; the rest are applied.
 export function applyPersistedSettings(target, stored) {
   if (!isPlainObject(stored)) return getTraderSettings(target);
   const filtered = Object.create(null);
@@ -250,10 +257,25 @@ export function applyPersistedSettings(target, stored) {
   const normalized = normalizePatch(filtered);
   delete normalized.symbol;
   const next = { ...getTraderSettings(target), ...normalized };
-  const errors = validateSettings(next);
-  if (errors.length) throw new Error(`invalid persisted settings: ${errors.join('; ')}`);
-  Object.assign(target, normalized);
+  const { accepted, rejected } = acceptValidSettings(next);
+  if (rejected.length) console.warn(`[settings] dropping invalid saved value(s): ${rejected.join('; ')}`);
+  Object.assign(target, accepted);
   return getTraderSettings(target);
+}
+
+// Per-key validation: keep every key that validates on its own, report the
+// rest. Used for restoring saved settings, where one bad value should not cost
+// the user the other twenty.
+function acceptValidSettings(next) {
+  const accepted = {};
+  const rejected = [];
+  for (const [key, value] of Object.entries(next)) {
+    const candidate = { ...getTraderSettings(DEFAULTS), [key]: value };
+    const errors = validateSettings(candidate);
+    if (errors.length) rejected.push(`${key}=${JSON.stringify(value)} (${errors.join('; ')})`);
+    else accepted[key] = value;
+  }
+  return { accepted, rejected };
 }
 
 export function canonicalSettingKey(input) {
