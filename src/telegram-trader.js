@@ -218,9 +218,15 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           const requested = rest.join(' ').trim();
           const value = requested || 'AUTO';
           if (value.toUpperCase() !== 'AUTO') {
-            const models = await listProviderModelsFor(provider);
-            if (!models.includes(value)) {
+            const models = await listProviderModelsFor(provider).catch(() => []);
+            // A model name is only rejected when the catalog is actually readable
+            // and does not contain it. If the gateway is down we accept the name,
+            // otherwise a flaky local proxy would make /setmodels unusable.
+            if (models.length && !models.includes(value)) {
               return usage(chatId, `Model is not available. Use one of: ${models.slice(0, 20).join(', ')}`);
+            }
+            if (!models.length) {
+              await sendMessage(chatId, `Warning: the model catalog is currently unreadable, so <code>${esc(value)}</code> was accepted without verification.`);
             }
           }
           const key = providerModelVar(provider);
@@ -351,7 +357,7 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           const keyName = providerKeyVar(provider) || 'AI_API_KEY';
           const lastError = agent?.lastError ? String(agent.lastError).slice(0, 600) : 'none';
           const modelState = describeModelConfig();
-          await sendMessage(chatId, `<b>Diag</b>\napi <code>${client ? 'ready' : 'missing'}</code>\ndb <code>${CONFIG.DATABASE_URL ? 'postgres' : 'file'}</code>\nws <code>configured</code>\nllm <code>${esc(provider)}</code> base <code>${esc(modelState.baseUrl || '-')}</code>\nmodel <code>${esc(CONFIG[modelKey] || 'AUTO')}</code> resolved <code>${esc(agent?.lastModel || modelState.resolvedModel || '-')}</code> key <code>${CONFIG[keyName] ? 'set' : 'missing'}</code>\ncandidates <code>${modelState.candidateCount || 0}</code>\nlast_error <code>${esc(lastError)}</code>`);
+          await sendMessage(chatId, `<b>Diag</b>\napi <code>${client ? 'ready' : 'missing'}</code>\ndb <code>${CONFIG.DATABASE_URL ? 'postgres' : 'file'}</code>\nws <code>configured</code>\nllm <code>${esc(provider)}</code> base <code>${esc(modelState.baseUrl || '-')}</code>\nmodel <code>${esc(CONFIG[modelKey] || 'AUTO')}</code> resolved <code>${esc(agent?.lastModel || modelState.resolvedModel || '-')}</code> key <code>${CONFIG[keyName] ? 'set' : 'missing'}</code>\ncandidates <code>${modelState.candidateCount || 0}</code>\ncatalog <code>${esc(modelState.catalogError || 'ok')}</code>\nlast_error <code>${esc(lastError)}</code>`);
           return true;
         }
         default:

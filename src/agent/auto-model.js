@@ -75,11 +75,18 @@ export function clearModelCache() {
 // ttlMs = 0 means cache forever (per process); a positive ttl re-fetches.
 // ---------------------------------------------------------------------------
 const listCache = new Map();
+const lastCatalogError = new Map(); // "name|baseUrl" -> why the last read failed
 
 // Drop the in-process catalog cache. Called when the model is re-selected (e.g.
 // `/setmodels AUTO`) so a fresh catalog is read instead of a stale one.
 export function resetModelCatalogCache() {
   listCache.clear();
+  lastCatalogError.clear();
+}
+
+// Why the most recent catalog read failed (for /diag). Empty object = all good.
+export function getLastCatalogError() {
+  return Object.fromEntries(lastCatalogError);
 }
 
 export async function listProviderModels(provider, { ttlMs = 0, signal } = {}) {
@@ -111,18 +118,25 @@ export async function listProviderModels(provider, { ttlMs = 0, signal } = {}) {
     }
 
     if (!res.ok) {
-      listCache.set(key, { ids: [], at: Date.now(), error: `HTTP ${res.status}` });
+      // A failed read is NOT cached. A local gateway that is still starting (or
+      // briefly down) must not leave the agent stuck with an empty catalog until
+      // the process restarts.
+      lastCatalogError.set(key, `HTTP ${res.status} from ${modelsUrl}`);
       return prev ? prev.ids : [];
     }
 
     const data = await res.json().catch(() => ({}));
     const ids = (data?.data || []).map(model => model?.id).filter(Boolean);
+    if (!ids.length) {
+      lastCatalogError.set(key, `${modelsUrl} answered with no models`);
+      return prev ? prev.ids : [];
+    }
+    lastCatalogError.delete(key);
     listCache.set(key, { ids, at: Date.now() });
     return ids;
-  } catch {
-    if (prev) return prev.ids;
-    listCache.set(key, { ids: [], at: Date.now() });
-    return [];
+  } catch (error) {
+    lastCatalogError.set(key, `${key}: ${String(error?.message || error).slice(0, 160)}`);
+    return prev ? prev.ids : [];
   }
 }
 

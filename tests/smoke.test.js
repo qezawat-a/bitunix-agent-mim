@@ -27,6 +27,7 @@ import {
   chat,
   describeModelConfig,
   listOpenAiModels,
+  resetModelState,
   resetOpenAiModelCache,
   resolveOpenAiModelsUrl,
   resolveOpenAiUrl,
@@ -598,7 +599,7 @@ describe('provider and websocket safety', () => {
   it('reports an empty catalog instead of guessing a model name', async () => {
     Object.assign(CONFIG, { AI_PROVIDER: 'openai', AI_BASE_URL: 'https://gw.test/v1', AI_API_KEY: 'test-key', AI_MODEL: 'AUTO' });
     globalThis.fetch = async () => ({ ok: true, json: async () => ({ data: [] }) });
-    await assert.rejects(() => chat([{ role: 'user', content: 'hi' }], 'openai'), /catalog came back empty/);
+    await assert.rejects(() => chat([{ role: 'user', content: 'hi' }], 'openai'), /no models came back/);
   });
 
   it('classifies per-model failures without switching on rate limits', () => {
@@ -638,6 +639,56 @@ describe('provider and websocket safety', () => {
     assert.match(reply.content, /سلام/);
     assert.doesNotMatch(reply.content, /Hichi bar nagasht/);
     assert.equal(reply.model, 'chat-model');
+  });
+
+  it('does not cache a failed catalog read', async () => {
+    // A local gateway that refuses once must not leave the agent stuck on an
+    // empty catalog until the process restarts.
+    Object.assign(CONFIG, { AI_PROVIDER: 'openai', AI_BASE_URL: 'http://127.0.0.1:20128/v1', AI_API_KEY: 'k', AI_MODEL: 'AUTO' });
+    let down = true;
+    globalThis.fetch = async (url) => {
+      if (String(url).endsWith('/models')) {
+        if (down) return { ok: false, status: 503, json: async () => ({}), text: async () => 'unavailable' };
+        return { ok: true, json: async () => ({ data: [{ id: 'live-model' }] }) };
+      }
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'pong' } }] }) };
+    };
+    await assert.rejects(() => chat([{ role: 'user', content: 'hi' }], 'openai'), /no models came back/);
+    // The failure is remembered so /diag can explain it...
+    assert.match(describeModelConfig().catalogError, /HTTP 503/);
+    // ...but it is not cached, so the very next message recovers on its own.
+    down = false;
+    const result = await chat([{ role: 'user', content: 'hi' }], 'openai');
+    assert.equal(result.text, 'pong');
+    assert.equal(result.model, 'live-model');
+    assert.equal(describeModelConfig().catalogError, null);
+  });
+
+  it('explains an empty catalog instead of saying only "came back empty"', async () => {
+    Object.assign(CONFIG, { AI_PROVIDER: 'openai', AI_BASE_URL: 'http://127.0.0.1:20128/v1', AI_API_KEY: 'k', AI_MODEL: 'AUTO' });
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ data: [] }), text: async () => '' });
+    await assert.rejects(
+      () => chat([{ role: 'user', content: 'hi' }], 'openai'),
+      /no models came back from GET http:\/\/127\.0\.0\.1:20128\/v1\/models/,
+    );
+  });
+
+  it('keeps the last good catalog when a later read fails', async () => {
+    Object.assign(CONFIG, { AI_PROVIDER: 'openai', AI_BASE_URL: 'https://flaky.test/v1', AI_API_KEY: 'k', AI_MODEL: 'AUTO' });
+    let calls = 0;
+    globalThis.fetch = async (url) => {
+      if (String(url).endsWith('/models')) {
+        calls += 1;
+        if (calls === 1) return { ok: true, json: async () => ({ data: [{ id: 'good-model' }] }) };
+        return { ok: false, status: 500, json: async () => ({}), text: async () => 'boom' };
+      }
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'pong' } }] }) };
+    };
+    await chat([{ role: 'user', content: 'hi' }], 'openai');
+    resetModelState();                     // in-process state gone, on-disk winner stays
+    const result = await chat([{ role: 'user', content: 'hi again' }], 'openai');
+    assert.equal(result.text, 'pong');
+    assert.equal(result.model, 'good-model');
   });
 
   it('lists models from an OpenAI-compatible endpoint', async () => {

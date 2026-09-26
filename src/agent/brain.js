@@ -39,6 +39,7 @@ import {
   saveModelCache,
   clearModelCache,
   resetModelCatalogCache,
+  getLastCatalogError,
 } from './auto-model.js';
 import { openaiReasoning, anthropicThinking } from './thinking.js';
 
@@ -260,11 +261,22 @@ const probeTool = {
 
 const modelState = new Map(); // "name|baseUrl" => { source, candidates, index, chosen, at }
 const lastProbeFailure = new Map();
+const lastCatalogErrors = getLastCatalogError;
 
-export function resetOpenAiModelCache() {
+// Forget everything held in memory (catalog + resolved model + probe log).
+// The on-disk winner in data/model-cache.json is kept, which is what happens on a
+// restart: the agent comes back on the last known-good model even if the gateway
+// is briefly unreachable.
+export function resetModelState() {
   modelState.clear();
   lastProbeFailure.clear();
   resetModelCatalogCache();
+}
+
+// Full reset, including the persisted winner. Used by `/setmodels` so the next
+// message performs a completely fresh discovery.
+export function resetOpenAiModelCache() {
+  resetModelState();
   clearModelCache();
 }
 
@@ -330,12 +342,19 @@ async function ensureModelState(p, signal) {
     // User pinned the model in .env — trusted, never probed.
     state = { source: 'explicit', candidates: [p.model], index: 0, chosen: p.model };
   } else {
-    const ids = await listProviderModels(p, { ttlMs: refresh ? ttl : 0, signal });
+    // A local gateway may briefly refuse or answer empty while it starts, so the
+    // catalog is read twice before giving up. Failures are never cached, so this
+    // recovers by itself on the next message.
+    let ids = await listProviderModels(p, { ttlMs: refresh ? ttl : 0, signal });
+    if (!ids.length) {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      ids = await listProviderModels(p, { ttlMs: 0, signal });
+    }
     const ranked = ids.length ? rankModels(ids) : [];
     if (!ranked.length) {
       throw new Error(
-        `${p.name}: the model catalog came back empty (GET ${p.baseUrl}/models). ` +
-        'Check the base URL and API key, or set the model explicitly.',
+        `${p.name}: no models came back from GET ${p.baseUrl}/models` +
+        `${catalogErrorHint()}. Check that the LLM gateway is running and that the key is accepted, or set the model explicitly.`,
       );
     }
     const probed = await probeModels(p, ranked, signal);
@@ -434,6 +453,13 @@ async function probeModels(p, candidates, signal) {
 // The best-ranked candidate this key is allowed to try.
 function firstUsable(candidates, denied) {
   return candidates.find(mid => !denied.has(mid)) || candidates[0];
+}
+
+// " (last read: HTTP 503 from http://127.0.0.1:20128/v1/models)" — the actual
+// reason the catalog came back empty, so /diag is not a dead end.
+function catalogErrorHint() {
+  const errors = Object.values(lastCatalogErrors());
+  return errors.length ? ` (last read: ${errors[errors.length - 1]})` : '';
 }
 
 // The next candidate after `from` that this key is allowed to try.
@@ -615,5 +641,6 @@ export function describeModelConfig() {
     resolvedModel: state ? state.chosen : null,
     source: state ? state.source : null,
     candidateCount: state && state.candidates ? state.candidates.length : 0,
+    catalogError: getLastCatalogError()[configured ? `${configured.name}|${configured.baseUrl}` : ''] || null,
   };
 }
