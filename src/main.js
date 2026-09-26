@@ -184,6 +184,11 @@ async function main() {
         const report = await trader.report({ lastSignal });
         if (report && CONFIG.ALLOWED_USER_ID) await sendMessage(CONFIG.ALLOWED_USER_ID, report);
       }
+      if (signal?.reversals?.length && CONFIG.ALLOWED_USER_ID) {
+        for (const item of signal.reversals) {
+          await sendMessage(CONFIG.ALLOWED_USER_ID, `<b>Reversal</b> closed <code>${esc(item.positionId)}</code> on <code>${esc(signal.symbol)}</code> — the committee reversed at ${item.confidence}%.`);
+        }
+      }
     } catch (error) {
       console.error('loop error:', error.message);
     } finally {

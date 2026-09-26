@@ -15,6 +15,7 @@ export class Trader {
   positionManager;
   state = {
     lastScan: null,
+    lastPrice: null,
     lastGuard: 0,
     lastReport: 0,
     lastManage: 0,
@@ -126,10 +127,17 @@ export class Trader {
       const result = await this.scanner.scan(symbol);
       if (CONFIG.symbol !== symbol) return null;
       this.state.lastScan = `${result.signal} ${Math.round(Number(result.confidence) || 0)}%${result.agreeingStrategies?.length ? ` (${result.agreeingStrategies.join(', ')})` : ''}`;
+      if (validPositive(result.lastPrice)) this.state.lastPrice = Number(result.lastPrice);
       const reversals = await this.checkReversal(result);
       if (!['bullish', 'bearish'].includes(result.signal)) {
         this.updateConfirmation(symbol, result.signal);
-        return reversals.length ? { symbol, signal: result.signal, confidence: result.confidence, reversals } : null;
+        return {
+          ...result,
+          executed: false,
+          reversals,
+          reason: reversals.length ? 'reversal' : 'no_entry',
+          price: Number(result.lastPrice),
+        };
       }
 
       const confirmations = this.updateConfirmation(symbol, result.signal);
@@ -349,16 +357,37 @@ export class Trader {
   // Everything option 8 asks for: the read, the price, the PnL of whatever is
   // open, and the open positions themselves. Returns null while it is too early
   // for the next report.
+  // A price is only useful at the precision the pair trades at, so it comes
+  // from the same trading_pairs lookup the order path uses. A pair with 5
+  // decimals must not be reported to 8.
+  async formatPrice(value) {
+    if (!validPositive(value)) return null;
+    const number = Number(value);
+    let decimals = 8;
+    try {
+      const rules = await this.client.getSymbolRules(CONFIG.symbol);
+      if (Number.isInteger(rules?.quotePrecision)) decimals = rules.quotePrecision;
+    } catch {}
+    return number.toFixed(decimals);
+  }
+
   async report({ lastSignal = null } = {}) {
     const now = Date.now();
     if (now < this.state.lastReport + CONFIG.report_interval_sec * 1000) return null;
     this.state.lastReport = now;
-    const lines = [`<b>${now}</b> <code>${CONFIG.symbol}</code>`];
+    const stamp = new Date(now).toISOString().replace('T', ' ').slice(0, 19);
+    const price = await this.formatPrice(lastSignal?.price ?? lastSignal?.lastPrice ?? this.state.lastPrice);
+    const symbol = lastSignal?.symbol || CONFIG.symbol;
+    const lines = [`<b>${stamp} UTC</b>  <code>${escText(symbol)}</code>`];
+    if (price) lines.push(`price <code>${escText(price)}</code>`);
     if (lastSignal) {
-      lines.push(`signal <b>${escText(lastSignal.signal)}</b> @ <code>${escText(String(lastSignal.price ?? lastSignal.lastPrice ?? '-'))}</code> (${Math.round(Number(lastSignal.confidence) || 0)}%)`);
+      const verdict = lastSignal.reason === 'awaiting_agent' ? 'actionable' : 'no entry';
+      lines.push(`signal <b>${escText(lastSignal.signal)}</b> ${Math.round(Number(lastSignal.confidence) || 0)}% (${verdict})`);
       if (lastSignal.agreeingStrategies?.length) lines.push(`backed by ${escText(lastSignal.agreeingStrategies.join(', '))}`);
+    } else {
+      lines.push('signal <b>waiting for first scan</b>');
     }
-    if (this.state.lastScan) lines.push(`last scan <b>${escText(this.state.lastScan)}</b>`);
+    if (lastSignal?.blockedBy?.length) lines.push(`blocked: ${escText(lastSignal.blockedBy.join(', '))}`);
 
     let positions = [];
     try {
@@ -381,7 +410,8 @@ export class Trader {
       }
       if (pnl !== null) totalPnl += pnl;
       const pnlText = pnl === null ? 'pnl n/a' : `pnl ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)}`;
-      lines.push(`${escText(position.positionId)} ${escText(position.side)} qty <code>${escText(String(position.size ?? '-'))}</code> mark <code>${escText(String(position.markPrice ?? '-'))}</code> ${pnlText}`);
+      const mark = await this.formatPrice(position.markPrice);
+      lines.push(`${escText(position.positionId)} ${escText(position.side)} qty <code>${escText(String(position.size ?? '-'))}</code> mark <code>${escText(mark ?? '-')}</code> ${pnlText}`);
     }
     lines.push(`total pnl ${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(4)} ${CONFIG.margin_coin || 'USDT'}`);
     return lines.join('\n');

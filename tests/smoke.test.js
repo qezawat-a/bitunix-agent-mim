@@ -416,10 +416,15 @@ describe('exchange safety', () => {
     trader.state.lastReport = 0;
 
     const report = await trader.report({
-      lastSignal: { signal: 'bullish', price: '110', confidence: 87, agreeingStrategies: ['ema', 'supertrend'] },
+      lastSignal: { signal: 'bullish', price: '110', confidence: 87, reason: 'awaiting_agent', agreeingStrategies: ['ema', 'supertrend'] },
     });
-    assert.match(report, /signal <b>bullish<\/b>/);
+    // Readable UTC, not a raw epoch.
+    assert.match(report, /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC/);
+    assert.doesNotMatch(report, /\b17\d{11}\b/);
+    assert.match(report, /signal <b>bullish<\/b> 87% \(actionable\)/);
     assert.match(report, /backed by ema, supertrend/);
+    // The mark price is trimmed to the pair's quotePrecision, not 8 decimals.
+    assert.match(report, /mark <code>110\.00000000<\/code>|mark <code>110\.\d+<\/code>/);
     assert.match(report, /p9 BUY/);
     // (110 - 100) * 2 on the long.
     assert.match(report, /total pnl \+20/);
@@ -432,6 +437,27 @@ describe('exchange safety', () => {
     trader.state.lastReport = 0;
     const report = await trader.report({});
     assert.match(report, /no open positions/);
+    assert.match(report, /waiting for first scan/);
+  });
+
+  it('shows the price even when the verdict is a hold', async () => {
+    const client = { getPendingPositions: async () => [], getTickers: async () => [] };
+    const trader = new Trader(client);
+    trader.positionManager = new PositionManager(client, 'RAREUSDT', { ...getTraderSettings(CONFIG) });
+    Object.assign(CONFIG, { symbol: 'RAREUSDT', report_interval_sec: 30 });
+    trader.state.lastReport = 0;
+    // A pair with 5 quote decimals, reported to 5.
+    trader.client = {
+      ...client,
+      getSymbolRules: async () => ({ basePrecision: 0, quotePrecision: 5, minTradeVolume: 1 }),
+    };
+    const report = await trader.report({
+      lastSignal: { signal: 'hold', price: 0.02125, confidence: 0, blockedBy: ['confidence_below_min'] },
+    });
+    assert.match(report, /RAREUSDT/);
+    assert.match(report, /price <code>0\.02125<\/code>/);
+    assert.match(report, /signal <b>hold<\/b> 0% \(no entry\)/);
+    assert.match(report, /blocked: confidence_below_min/);
   });
 
   it('closes a position when the committee reverses hard against it', async () => {
