@@ -18,8 +18,10 @@
 //   4. If NO candidate answers the probe we still use the first one from the
 //      catalog. A probe failure is not proof the model is unusable.
 //   5. During the real request, a per-model failure (402/403 access denied,
-//      404 unknown model, quota) automatically advances to the next model the
-//      provider listed, and models this key is denied are skipped.
+//      404 unknown model, quota, or a 429 rate limit on this key) automatically
+//      advances to the next model the provider listed, and models this key is
+//      denied or rate-limited on are skipped. A rate limit is only remembered
+//      for as long as the current resolution lasts, so it is retried later.
 //
 // There is no model list, ranking, or fallback list in this code. Everything
 // comes from the provider's own /models response for the key that was given.
@@ -36,6 +38,7 @@ import {
   listProviderModels,
   isBalanceError,
   isAuthError,
+  isRateLimitError,
   shouldAdvanceModel,
   resetModelCatalogCache,
   getLastCatalogError,
@@ -341,20 +344,23 @@ async function ensureModelState(p, signal) {
     // No probe passed → still try the first usable model from the catalog. A
     // failed probe is not proof that the model is unusable, and the request path
     // below advances to the next listed model if this one is rejected.
-    const chosen = probed.chosen || firstUsable(models, probed.denied);
+    const chosen = probed.chosen || firstUsable(models, probed.denied, probed.rateLimited);
     state = {
       source: 'auto',
       candidates: models,
-      // The probe already told us which models this key may not use, so the
-      // request path skips them instead of discovering them one 401 at a time.
+      // The probe already told us which models this key may not use, and which
+      // ones this key is currently rate-limited on, so the request path skips
+      // them instead of discovering them one failed request at a time.
       denied: [...probed.denied],
+      rateLimited: [...probed.rateLimited],
       index: models.indexOf(chosen) >= 0 ? models.indexOf(chosen) : 0,
       chosen,
     };
     console.log(
       `[auto-model] ${p.name}: chosen '${chosen}' (from ${models.length} models reported by the provider` +
       `${probed.chosen ? '' : ', no probe passed — trying the first usable one'}` +
-      `${probed.denied.size ? `, ${probed.denied.size} not usable with this key` : ''})`,
+      `${probed.denied.size ? `, ${probed.denied.size} not usable with this key` : ''}` +
+      `${probed.rateLimited.size ? `, ${probed.rateLimited.size} rate-limited on this key` : ''})`,
     );
   }
 
@@ -368,11 +374,14 @@ async function ensureModelState(p, signal) {
 //   Tier 1 — native tool call (best for an agent that needs tools)
 //   Tier 2 — plain text answer (usable, just weaker)
 //
-// Returns { chosen, denied }. `denied` holds the models this key is not allowed
-// to use, so the real request can skip them without paying for a 401 each.
+// Returns { chosen, denied, rateLimited }. `denied` holds the models this key is
+// not allowed to use, and `rateLimited` the ones this key is rate-limited on, so
+// the real request can skip them without paying for a failed request each.
+// A rate limit is temporary, so it never lands in `denied`.
 async function probeModels(p, candidates, signal) {
   const cap = candidates.slice(0, PROBE_MAX_MODELS);
   const denied = new Set();
+  const rateLimited = new Set();
   const reachable = [];
   const messages = [{ role: 'user', content: 'What is the bot status? Use the get_status function to check.' }];
   const plain = [{ role: 'user', content: 'ping' }];
@@ -387,13 +396,14 @@ async function probeModels(p, candidates, signal) {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         const bodyText = JSON.stringify(data);
-        if (isBalanceError(res.status, bodyText) || shouldAdvanceModel(res.status, bodyText)) denied.add(mid);
+        if (isRateLimitError(res.status, bodyText)) rateLimited.add(mid);
+        else if (isBalanceError(res.status, bodyText) || shouldAdvanceModel(res.status, bodyText)) denied.add(mid);
         lastProbeFailure.set(mid, `HTTP ${res.status} ${bodyText.slice(0, 160)}`);
         console.log(`[auto-model] probe ${mid}: HTTP ${res.status} — rejected`);
         continue;
       }
       const parsed = p.name === 'anthropic' ? parseAnthropicResp(data) : parseOpenAIResp(data);
-      if (parsed.toolCalls.length) return { chosen: mid, denied }; // native tool calling — best choice
+      if (parsed.toolCalls.length) return { chosen: mid, denied, rateLimited }; // native tool calling — best choice
       // Reachable, but it did not use the tool.
       reachable.push(mid);
     } catch (e) {
@@ -412,25 +422,28 @@ async function probeModels(p, candidates, signal) {
         ? buildAnthropicReq(provider, { system: '', messages: plain, tools: [] })
         : buildOpenAIReq(provider, { system: '', messages: plain, tools: [] });
       const res = await postJson(req.url, req.headers, req.body, PROBE_TIMEOUT_MS, signal);
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        denied.add(mid);
+        const bodyText = JSON.stringify(data);
+        if (isRateLimitError(res.status, bodyText)) rateLimited.add(mid);
+        else if (isBalanceError(res.status, bodyText) || shouldAdvanceModel(res.status, bodyText)) denied.add(mid);
         continue;
       }
-      const data = await res.json().catch(() => ({}));
       const parsed = p.name === 'anthropic' ? parseAnthropicResp(data) : parseOpenAIResp(data);
       if (parsed.content && String(parsed.content).trim()) {
         console.log(`[auto-model] probe ${mid}: answers text (Tier 2 — accepted)`);
-        return { chosen: mid, denied };
+        return { chosen: mid, denied, rateLimited };
       }
     } catch { /* try the next candidate */ }
   }
 
-  return { chosen: '', denied };
+  return { chosen: '', denied, rateLimited };
 }
 
-// The first model in the provider's own list that this key is allowed to try.
-function firstUsable(models, denied) {
-  return models.find(mid => !denied.has(mid)) || models[0];
+// The first model in the provider's own list that this key is allowed to try right
+// now — one that is neither denied nor rate-limited. Still no list of our own.
+function firstUsable(models, denied, rateLimited = new Set()) {
+  return models.find(mid => !denied.has(mid) && !rateLimited.has(mid)) || models.find(mid => !denied.has(mid)) || models[0];
 }
 
 // " (last read: HTTP 503 from http://127.0.0.1:20128/v1/models)" — the actual
@@ -440,10 +453,12 @@ function catalogErrorHint() {
   return errors.length ? ` (last read: ${errors[errors.length - 1]})` : '';
 }
 
-// The next candidate after `from` that this key is allowed to try.
-function nextCandidate(candidates, denied, from) {
+// The next candidate after `from` that this key is allowed to try right now.
+// `denied` is permanent for the resolved model, `rateLimited` is only for as long
+// as this resolution lasts.
+function nextCandidate(candidates, denied, rateLimited, from) {
   for (let i = from + 1; i < candidates.length; i++) {
-    if (!denied.has(candidates[i])) return candidates[i];
+    if (!denied.has(candidates[i]) && !rateLimited.has(candidates[i])) return candidates[i];
   }
   return null;
 }
@@ -480,6 +495,7 @@ async function chatWithProviders({ system = '', messages = [], tools = [], think
     let attempts = 0;
     const maxAttempts = st.source === 'auto' ? st.candidates.length + 1 : 1;
     const denied = new Set(st.denied || []);
+    const rateLimited = new Set(st.rateLimited || []);
     while (attempts < maxAttempts) {
       attempts++;
       try {
@@ -494,19 +510,27 @@ async function chatWithProviders({ system = '', messages = [], tools = [], think
             errors.push(`${p.name}: ${res.status} — ${bodyText.slice(0, 300)} (key rejected by provider)`);
             break;
           }
-          // This model is unusable for this key → try the next candidate.
-          if ((isBalanceError(res.status, bodyText) || shouldAdvanceModel(res.status, bodyText))
+          // This model is unusable for this key → try the next candidate. A rate
+          // limit counts: the key cannot use this model right now, and the next
+          // one the provider listed usually can.
+          const rateLimitedHere = isRateLimitError(res.status, bodyText);
+          if ((rateLimitedHere || isBalanceError(res.status, bodyText) || shouldAdvanceModel(res.status, bodyText))
               && st.source === 'auto') {
             const prev = st.chosen;
-            if (isBalanceError(res.status, bodyText)) denied.add(prev);
-            const next = nextCandidate(st.candidates, denied, st.index);
+            if (rateLimitedHere) rateLimited.add(prev);
+            else if (isBalanceError(res.status, bodyText)) denied.add(prev);
+            const next = nextCandidate(st.candidates, denied, rateLimited, st.index);
             if (next) {
               st.index = st.candidates.indexOf(next);
               st.chosen = next;
               p.model = next;
-              errors.push(`${p.name}: model '${prev}' rejected (HTTP ${res.status}) — moving to '${next}'`);
+              st.denied = [...denied];
+              st.rateLimited = [...rateLimited];
+              errors.push(`${p.name}: model '${prev}' ${rateLimitedHere ? 'rate-limited (HTTP 429)' : `rejected (HTTP ${res.status})`} — moving to '${next}'`);
               continue;
             }
+            errors.push(`${p.name}/${prev}: every model the provider listed is unavailable for this key (last: HTTP ${res.status})`);
+            break;
           }
           errors.push(`${p.name}/${p.model}: HTTP ${res.status} — ${bodyText.slice(0, 300)}`);
           break;
@@ -516,15 +540,19 @@ async function chatWithProviders({ system = '', messages = [], tools = [], think
         return { ...parsed, provider: p.name, model: p.model, state: st.source };
       } catch (e) {
         const msg = String(e.message || e);
-        if ((isBalanceError(0, msg) || shouldAdvanceModel(0, msg)) && st.source === 'auto') {
+        const rateLimitedHere = isRateLimitError(0, msg);
+        if ((rateLimitedHere || isBalanceError(0, msg) || shouldAdvanceModel(0, msg)) && st.source === 'auto') {
           const prev = st.chosen;
-          const next = nextCandidate(st.candidates, denied, st.index);
+          if (rateLimitedHere) rateLimited.add(prev);
+          else if (isBalanceError(0, msg)) denied.add(prev);
+          const next = nextCandidate(st.candidates, denied, rateLimited, st.index);
           if (next) {
-            if (isBalanceError(0, msg)) denied.add(prev);
             st.index = st.candidates.indexOf(next);
             st.chosen = next;
             p.model = next;
-            errors.push(`${p.name}: model '${prev}' unusable (${msg.slice(0, 120)}) — moving to '${next}'`);
+            st.denied = [...denied];
+            st.rateLimited = [...rateLimited];
+            errors.push(`${p.name}: model '${prev}' ${rateLimitedHere ? 'rate-limited' : 'unusable'} (${msg.slice(0, 120)}) — moving to '${next}'`);
             continue;
           }
         }
@@ -619,6 +647,8 @@ export function describeModelConfig() {
     resolvedModel: state ? state.chosen : null,
     source: state ? state.source : null,
     candidateCount: state && state.candidates ? state.candidates.length : 0,
+    deniedModels: state ? [...(state.denied || [])] : [],
+    rateLimitedModels: state ? [...(state.rateLimited || [])] : [],
     catalogError: getLastCatalogError()[configured ? `${configured.name}|${configured.baseUrl}` : ''] || null,
   };
 }

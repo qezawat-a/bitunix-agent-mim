@@ -30,7 +30,9 @@ key can see, and uses them:
 4. If no probe answers, the first usable model from that list is used anyway — a
    failed probe is not proof the model is broken.
 5. A model the key is not allowed to use (402/403, 404, quota) is skipped and the
-   next model from the provider's list is tried. A rejected *key* (401 invalid
+   next model from the provider's list is tried. A model that answers **429 rate
+   limited on that key** is skipped too, and remembered as rate-limited — not as
+   denied — so a later re-resolution tries it again. A rejected *key* (401 invalid
    key) fails fast with the provider's own message.
 6. Nothing is written to disk and there is no fallback list: after a restart the
    provider is asked again.

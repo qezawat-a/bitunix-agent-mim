@@ -239,7 +239,7 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           const input = parseHarnessInput(arg);
           if (!input.message) return usage(chatId, 'Harness message cannot be empty.');
           const reply = await agent.say(input.message);
-          await sendMessage(chatId, `<code>${esc(JSON.stringify({ id: input.id, ok: true, reply: reply?.content || '', model: CONFIG.AI_MODEL, rounds: reply?.rounds }))}</code>`);
+          await sendMessage(chatId, `<code>${esc(JSON.stringify({ id: input.id, ok: true, reply: reply?.content || '', model: reply?.model || CONFIG.AI_MODEL, rounds: reply?.rounds }))}</code>`);
           return true;
         }
         case 'skills':
@@ -353,7 +353,12 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           const keyName = providerKeyVar(provider) || 'AI_API_KEY';
           const lastError = agent?.lastError ? String(agent.lastError).slice(0, 600) : 'none';
           const modelState = describeModelConfig();
-          await sendMessage(chatId, `<b>Diag</b>\napi <code>${client ? 'ready' : 'missing'}</code>\ndb <code>${CONFIG.DATABASE_URL ? 'postgres' : 'file'}</code>\nws <code>configured</code>\nllm <code>${esc(provider)}</code> base <code>${esc(modelState.baseUrl || '-')}</code>\nmodel <code>${esc(CONFIG[modelKey] || 'AUTO')}</code> resolved <code>${esc(agent?.lastModel || modelState.resolvedModel || '-')}</code> key <code>${CONFIG[keyName] ? 'set' : 'missing'}</code>\ncandidates <code>${modelState.candidateCount || 0}</code>\ncatalog <code>${esc(modelState.catalogError || 'ok')}</code>\nlast_error <code>${esc(lastError)}</code>`);
+          const skipped = [
+            ...(modelState.deniedModels || []).map(m => `${m} (no access)`),
+            ...(modelState.rateLimitedModels || []).map(m => `${m} (rate limited)`),
+          ];
+          const skippedNote = skipped.length ? `\nskipped <code>${esc(skipped.join(', '))}</code>` : '';
+          await sendMessage(chatId, `<b>Diag</b>\napi <code>${client ? 'ready' : 'missing'}</code>\ndb <code>${CONFIG.DATABASE_URL ? 'postgres' : 'file'}</code>\nws <code>configured</code>\nllm <code>${esc(provider)}</code> base <code>${esc(modelState.baseUrl || '-')}</code>\nmodel <code>${esc(CONFIG[modelKey] || 'AUTO')}</code> resolved <code>${esc(agent?.lastModel || modelState.resolvedModel || '-')}</code> key <code>${CONFIG[keyName] ? 'set' : 'missing'}</code>\ncandidates <code>${modelState.candidateCount || 0}</code>${skippedNote}\ncatalog <code>${esc(modelState.catalogError || 'ok')}</code>\nlast_error <code>${esc(lastError)}</code>`);
           return true;
         }
         default:

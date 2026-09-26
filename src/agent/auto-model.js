@@ -125,8 +125,27 @@ export function isAuthError(status, text) {
   );
 }
 
+// 429 (rate limit) is its own case: it is not a permission or balance verdict, so
+// it is neither `denied` nor an advance reason on its own. But it does answer the
+// question that matters here — "can this key use this model?" — with no, not
+// right now. A key that is rate-limited on one model is often fine on the next
+// one the provider listed, so the probe skips it and the request path moves on
+// instead of failing the whole turn. It is remembered separately from `denied`
+// so a later re-resolution can try the same model again.
+export function isRateLimitError(status, text) {
+  const low = String(text || '').toLowerCase();
+  return (
+    status === 429 ||
+    low.includes('rate limit') ||
+    low.includes('rate_limit') ||
+    low.includes('too many requests') ||
+    low.includes('requests per minute') ||
+    low.includes('tokens per minute')
+  );
+}
+
 // A per-model rejection: move on to the next model from the provider's list.
-// 429 (rate limit) is deliberately not an advance reason.
+// 429 (rate limit) is deliberately not an advance reason — see isRateLimitError.
 export function shouldAdvanceModel(status, text) {
   if (isBalanceError(status, text)) return true;
   if (status === 404) return true;

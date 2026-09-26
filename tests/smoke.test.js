@@ -21,7 +21,7 @@ import { PositionManager } from '../src/trader/position-manager.js';
 import { setPositionManager, setTraderInstances, traderTools } from '../src/trader/agent-tools.js';
 import { bitunixTools, setBitunixClient } from '../src/bitunix/futures-tools.js';
 import { detectProviders, primaryProviderName } from '../src/agent/config.js';
-import { isAuthError, isBalanceError, shouldAdvanceModel } from '../src/agent/auto-model.js';
+import { isAuthError, isBalanceError, isRateLimitError, shouldAdvanceModel } from '../src/agent/auto-model.js';
 import {
   chat,
   describeModelConfig,
@@ -606,6 +606,73 @@ describe('provider and websocket safety', () => {
     assert.equal(shouldAdvanceModel(404, 'model_not_found'), true);
     assert.equal(shouldAdvanceModel(429, 'rate limit'), false);
     assert.equal(shouldAdvanceModel(400, 'unsupported model'), true);
+    // A 429 is a rate limit, not a balance or access verdict — and it is not a
+    // reason to blacklist a model, only to skip it for this resolution.
+    assert.equal(isRateLimitError(429, 'rate limit'), true);
+    assert.equal(isRateLimitError(429, ''), true);
+    assert.equal(isRateLimitError(200, 'Rate limit exceeded'), true);
+    assert.equal(isRateLimitError(403, 'key_model_access_denied'), false);
+    assert.equal(isRateLimitError(402, 'insufficient_quota'), false);
+  });
+
+  it('skips a model this key is rate-limited on and uses the next one', async () => {
+    // The reported production failure: the first models in the catalog all answer
+    // 429 for this key, so the agent used to pick one and then go silent.
+    Object.assign(CONFIG, { AI_PROVIDER: 'openai', AI_BASE_URL: 'https://gw.test/v1', AI_API_KEY: 'test-key', AI_MODEL: 'AUTO' });
+    const asked = [];
+    globalThis.fetch = async (url, options) => {
+      if (url.endsWith('/models')) {
+        return { ok: true, json: async () => ({ data: [{ id: 'limited-a' }, { id: 'limited-b' }, { id: 'good-c' }] }) };
+      }
+      const body = JSON.parse(options.body);
+      asked.push(body.model);
+      const limited = body.model === 'limited-a' || body.model === 'limited-b';
+      if (limited) {
+        return { ok: false, status: 429, json: async () => ({ error: { message: 'rate limit exceeded' } }), text: async () => 'rate limit exceeded' };
+      }
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'pong' } }] }) };
+    };
+    const result = await chat([{ role: 'user', content: 'ping' }], 'openai');
+    assert.equal(result.text, 'pong');
+    assert.equal(result.model, 'good-c');
+    // The rate-limited models are skipped, not denied: they stay in the catalog
+    // so a later re-resolution can try them again.
+    const state = describeModelConfig();
+    assert.ok(state.rateLimitedModels.includes('limited-a'));
+    assert.ok(state.rateLimitedModels.includes('limited-b'));
+    assert.equal(state.deniedModels.length, 0);
+    assert.ok(!asked.some(model => !['limited-a', 'limited-b', 'good-c'].includes(model)), 'only provider-listed models are ever requested');
+  });
+
+  it('does not let a rate-limited model burn every turn', async () => {
+    Object.assign(CONFIG, { AI_PROVIDER: 'openai', AI_BASE_URL: 'https://gw.test/v1', AI_API_KEY: 'test-key', AI_MODEL: 'AUTO' });
+    const realRequests = [];
+    globalThis.fetch = async (url, options) => {
+      if (url.endsWith('/models')) {
+        return { ok: true, json: async () => ({ data: [{ id: 'busy-model' }, { id: 'spare-model' }] }) };
+      }
+      const body = JSON.parse(options.body);
+      if (!body.tools) realRequests.push(body.model);
+      if (body.model === 'busy-model') {
+        return { ok: false, status: 429, json: async () => ({ error: { message: 'rate limit' } }), text: async () => 'rate limit' };
+      }
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'ok' } }] }) };
+    };
+    await chat([{ role: 'user', content: 'hi' }], 'openai');
+    // The second turn must go straight to the model that works.
+    await chat([{ role: 'user', content: 'hi again' }], 'openai');
+    const after = realRequests.slice(realRequests.indexOf('spare-model') + 1);
+    assert.ok(after.length >= 1);
+    assert.ok(!after.includes('busy-model'), 'the rate-limited model is not retried while the resolution stands');
+  });
+
+  it('explains when every listed model is rate-limited', async () => {
+    Object.assign(CONFIG, { AI_PROVIDER: 'openai', AI_BASE_URL: 'https://gw.test/v1', AI_API_KEY: 'test-key', AI_MODEL: 'AUTO' });
+    globalThis.fetch = async (url, options) => {
+      if (url.endsWith('/models')) return { ok: true, json: async () => ({ data: [{ id: 'only-model' }] }) };
+      return { ok: false, status: 429, json: async () => ({ error: { message: 'rate limit exceeded' } }), text: async () => 'rate limit exceeded' };
+    };
+    await assert.rejects(() => chat([{ role: 'user', content: 'hi' }], 'openai'), /every model the provider listed is unavailable for this key/);
   });
 
   it('sends a normal reply to a plain chat message', async () => {
@@ -793,9 +860,11 @@ describe('provider and websocket safety', () => {
     CONFIG.BITUNIX_API_SECRET = 'ws-secret';
     CONFIG.symbol = 'BTCUSDT';
     const ws = new BitunixWs({}, FakeSocket);
-    const publicSocket = ws.connectPublic([{ ch: 'kline', symbol: 'ETHUSDT', interval: '1m' }, 'ticker']);
+    // Bitunix names its kline channels market_kline_<interval> / mark_kline_<interval>
+    // (see futures/websocket/public/kline channel) — there is no bare "kline" channel.
+    const publicSocket = ws.connectPublic([{ ch: 'market_kline_1min', symbol: 'ETHUSDT' }, 'ticker']);
     publicSocket.handlers.open();
-    assert.deepEqual(publicSocket.sent[0], { op: 'subscribe', args: [{ ch: 'kline', symbol: 'ETHUSDT', interval: '1m' }, { ch: 'ticker', symbol: 'BTCUSDT' }] });
+    assert.deepEqual(publicSocket.sent[0], { op: 'subscribe', args: [{ ch: 'market_kline_1min', symbol: 'ETHUSDT' }, { ch: 'ticker', symbol: 'BTCUSDT' }] });
     const privateSocket = ws.connectPrivate(['balance', 'tpsl']);
     privateSocket.handlers.open();
     assert.equal(privateSocket.sent[0].op, 'login');
