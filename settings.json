@@ -5,14 +5,24 @@
     "autonomousIntervalSec": 15,
     "maxRounds": 8,
     "autoCompact": true,
-    "thinking": { "enabled": true, "level": "mid", "budget": 5000 }
+    "thinking": {
+      "enabled": true,
+      "level": "mid",
+      "budget": 5000
+    }
   },
   "trader": {
     "symbol": "BTCUSDT",
     "leverage": 10,
     "position_type": "crossed",
     "position_mode": "hedge",
-    "timeframes": ["1m", "3m", "5m", "15m", "1h"],
+    "timeframes": [
+      "1m",
+      "3m",
+      "5m",
+      "15m",
+      "1h"
+    ],
     "min_confidence": 80,
     "tf_min_confidence": 60,
     "min_agreeing_strategies": 2,
@@ -25,8 +35,9 @@
     "breakeven_threshold_pct": 20,
     "trailing_trigger_roi_pct": 25,
     "reversal_enabled": true,
-    "reversal_confidence": 85,
-    "on_tpsl_failure": "cancel"
+    "reversal_confidence": 85
   },
-  "mcp": { "servers": [] }
+  "mcp": {
+    "servers": []
+  }
 }

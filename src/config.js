@@ -3,6 +3,18 @@ import fs from 'fs/promises';
 
 const S = (v, fallback) => process.env[v] ?? fallback;
 
+// The documented names win, and the older ones still work, so an existing .env
+// keeps running. AUTO means "ask the provider which models this key can see".
+function firstSet(...names) {
+  for (const name of names) {
+    const value = String(process.env[name] ?? '').trim();
+    if (value) return value;
+  }
+  return '';
+}
+
+const MODEL = (...names) => firstSet(...names) || 'AUTO';
+
 export function parseBoolean(value, fallback, name = 'value') {
   if (value === undefined || value === null || String(value).trim() === '') return fallback;
   const normalized = String(value).trim().toLowerCase();
@@ -16,17 +28,17 @@ function B(v, fallback, name) {
 }
 
 export const CONFIG = {
-  // LLM
+  // LLM. AUTO (any case) means auto-set-model-by-key.
   AI_PROVIDER: S('AI_PROVIDER', 'auto'),
-  AI_BASE_URL: S('AI_BASE_URL', ''),
-  AI_API_KEY: S('AI_API_KEY', ''),
-  AI_MODEL: S('AI_MODEL', 'AUTO'),
-  ANTHROPIC_API_KEY: S('ANTHROPIC_API_KEY', ''),
-  ANTHROPIC_BASE_URL: S('ANTHROPIC_BASE_URL', ''),
-  ANTHROPIC_MODEL: S('ANTHROPIC_MODEL', 'AUTO'),
-  GEMINI_API_KEY: S('GEMINI_API_KEY', ''),
-  GEMINI_BASE_URL: S('GEMINI_BASE_URL', ''),
-  GEMINI_MODEL: S('GEMINI_MODEL', 'AUTO'),
+  AI_BASE_URL: firstSet('OPENAI_COMPATIBLE_URL', 'AI_BASE_URL'),
+  AI_API_KEY: firstSet('OPENAI_COMPATIBLE_KEY', 'AI_API_KEY'),
+  AI_MODEL: MODEL('OPENAI_COMPATIBALE_MODEL', 'OPENAI_COMPATIBLE_MODEL', 'AI_MODEL'),
+  ANTHROPIC_API_KEY: firstSet('ANTHROPIC_API_KEY'),
+  ANTHROPIC_BASE_URL: firstSet('ANTHROPIC_BASE_URL', 'BASE_URL'),
+  ANTHROPIC_MODEL: MODEL('ANTHROPIC_MODEL'),
+  GEMINI_API_KEY: firstSet('GEMINI_GOOGLE_KEY', 'GEMINI_API_KEY'),
+  GEMINI_BASE_URL: firstSet('GEMINI_GOOGLE_URL', 'GEMINI_BASE_URL'),
+  GEMINI_MODEL: MODEL('GEMINI_GOOGLE_MODEL', 'GEMINI_MODEL'),
   AI_AUTO_REFRESH: Number(S('AI_AUTO_REFRESH', 0)),
   AI_MODEL_TTL: Number(S('AI_MODEL_TTL', 600000)),
 
@@ -61,7 +73,6 @@ export const CONFIG = {
   position_type: S('position_type', 'crossed'),
   timeframes: (S('timeframes', '1m,3m,5m,15m,1h')).split(',').map(t => t.trim()),
   margin_amount_pct: Number(S('margin_amount_pct', 2)),
-  margin_risk_pct: Number(S('margin_risk_pct', 2)),
   min_confidence: Number(S('min_confidence', 80)),
   tf_min_confidence: Number(S('tf_min_confidence', 60)),
   min_agreeing_strategies: Number(S('min_agreeing_strategies', 2)),
@@ -72,11 +83,10 @@ export const CONFIG = {
   scan_interval_sec: Number(S('scan_interval_sec', 15)),
   guard_interval_sec: Number(S('guard_interval_sec', 15)),
   breakeven_threshold_pct: Number(S('breakeven_threshold_pct', 20)),
-  trailing_stop_pct: Number(S('trailing_stop_pct', 2)),
   trailing_trigger_roi_pct: Number(S('trailing_trigger_roi_pct', 25)),
   trailing_distance_pct: Number(S('trailing_distance_pct', 1)),
   sl_liquidation_safety: Number(S('sl_liquidation_safety', 0.60)),
-  on_tpsl_failure: S('on_tpsl_failure', 'cancel'),
+  on_tpsl_failure: S('on_tpsl_failure', 'hold'),
   reversal_enabled: B(S('reversal_enabled', 'true'), true, 'reversal_enabled'),
   reversal_confidence: Number(S('reversal_confidence', 85)),
   report_interval_sec: Number(S('report_interval_sec', 30)),
@@ -87,10 +97,10 @@ export const CONFIG = {
 };
 
 const FILE_TRADER_KEYS = new Set([
-  'symbol', 'leverage', 'position_type', 'timeframes', 'margin_amount_pct', 'margin_risk_pct',
+  'symbol', 'leverage', 'position_type', 'timeframes', 'margin_amount_pct',
   'min_confidence', 'tf_min_confidence', 'min_agreeing_strategies', 'signal_confirm_scans',
   'cooldown_minutes', 'max_positions', 'position_mode', 'scan_interval_sec', 'guard_interval_sec',
-  'breakeven_threshold_pct', 'trailing_stop_pct', 'trailing_trigger_roi_pct', 'trailing_distance_pct',
+  'breakeven_threshold_pct', 'trailing_trigger_roi_pct', 'trailing_distance_pct',
   'sl_liquidation_safety', 'on_tpsl_failure', 'reversal_enabled', 'reversal_confidence',
   'report_interval_sec', 'mid_manage_interval_sec', 'order_unit', 'position_sizing_margin_pct',
 ]);

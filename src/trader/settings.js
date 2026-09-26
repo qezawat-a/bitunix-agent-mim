@@ -7,7 +7,6 @@ export const DEFAULTS = {
   position_type: 'crossed',
   timeframes: ['1m', '3m', '5m', '15m', '1h'],
   margin_amount_pct: 2,
-  margin_risk_pct: 2,
   min_confidence: 80,
   tf_min_confidence: 60,
   min_agreeing_strategies: 2,
@@ -18,11 +17,10 @@ export const DEFAULTS = {
   scan_interval_sec: 15,
   guard_interval_sec: 15,
   breakeven_threshold_pct: 20,
-  trailing_stop_pct: 2,
   trailing_trigger_roi_pct: 25,
   trailing_distance_pct: 1,
   sl_liquidation_safety: 0.60,
-  on_tpsl_failure: 'cancel',
+  on_tpsl_failure: 'hold',
   reversal_enabled: true,
   reversal_confidence: 85,
   report_interval_sec: 30,
@@ -76,13 +74,11 @@ const INTEGER_KEYS = new Set([
 ]);
 const NUMBER_KEYS = new Set([
   'margin_amount_pct',
-  'margin_risk_pct',
   'min_confidence',
   'tf_min_confidence',
   'scan_interval_sec',
   'guard_interval_sec',
   'breakeven_threshold_pct',
-  'trailing_stop_pct',
   'trailing_trigger_roi_pct',
   'trailing_distance_pct',
   'sl_liquidation_safety',
@@ -96,7 +92,7 @@ const ENUMS = {
   position_type: ['crossed', 'isolated'],
   position_mode: ['hedge', 'one-way'],
   order_unit: ['cost', 'qty', 'position_size'],
-  on_tpsl_failure: ['cancel', 'close', 'alert'],
+  on_tpsl_failure: ['hold', 'close'],
 };
 
 function isPlainObject(value) {
@@ -183,7 +179,6 @@ export function validateSettings(s) {
 
   addRangeError(errors, 'leverage', s.leverage, 1, 125, true);
   addRangeError(errors, 'margin_amount_pct', s.margin_amount_pct, 0.01, 100);
-  addRangeError(errors, 'margin_risk_pct', s.margin_risk_pct, 0.01, 100);
   addRangeError(errors, 'min_confidence', s.min_confidence, 0, 100);
   addRangeError(errors, 'tf_min_confidence', s.tf_min_confidence, 0, 100);
   addRangeError(errors, 'min_agreeing_strategies', s.min_agreeing_strategies, 1, 100, true);
@@ -193,7 +188,6 @@ export function validateSettings(s) {
   addRangeError(errors, 'scan_interval_sec', s.scan_interval_sec, 5, 86400, true);
   addRangeError(errors, 'guard_interval_sec', s.guard_interval_sec, 5, 86400, true);
   addRangeError(errors, 'breakeven_threshold_pct', s.breakeven_threshold_pct, 0, 1000);
-  addRangeError(errors, 'trailing_stop_pct', s.trailing_stop_pct, 0, 1000);
   addRangeError(errors, 'trailing_trigger_roi_pct', s.trailing_trigger_roi_pct, 0, 10000);
   addRangeError(errors, 'trailing_distance_pct', s.trailing_distance_pct, 0.01, 100);
   addRangeError(errors, 'sl_liquidation_safety', s.sl_liquidation_safety, 0.01, 1);

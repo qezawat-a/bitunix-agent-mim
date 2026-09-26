@@ -57,10 +57,10 @@ async function checkSymbolListed(client, symbol) {
   return { ok: false, message: `${wanted} is not traded on Bitunix USDT-M — ${hint}` };
 }
 
-export function createTraderCommands({ client, scanner, trader, agent, loadSession = null, saveSession = null, mcpServers = [], getMcpTools = () => [], reloadMcpTools = null }) {
+export function createTraderCommands({ client, scanner, trader, agent, agentState = null, loadSession = null, saveSession = null, mcpServers = [], getMcpTools = () => [], reloadMcpTools = null }) {
   const scanState = { scanOn: true };
   const reportState = { reportOn: true };
-  const agentState = { autonomous: Boolean(CONFIG.AGENT_AUTONOMOUS) };
+  if (agentState && agentState.autonomous === undefined) agentState.autonomous = Boolean(CONFIG.AGENT_AUTONOMOUS);
 
   async function handleCommand(msg, text) {
     const chatId = msg.chat.id;
@@ -85,7 +85,7 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           return true;
         }
         case 'help': {
-          await sendMessage(chatId, '<b>Commands</b>\n/start /stop /status /help /settings /set /get /signal /balance /positions /trades /pnl /close &lt;symbol&gt; &lt;positionId&gt; /close_all &lt;symbol&gt; confirm /scan /report /leverage /symbol /marginmode /positionmode /models /setmodels /harness /skill|/skills /soul /mcp /thinking /memory /resume /ask /diag');
+          await sendMessage(chatId, '<b>Commands</b>\n/start /stop /status /help /settings /set /get /signal /balance /positions /trades /pnl /close &lt;symbol&gt; &lt;positionId&gt; /close_all &lt;symbol&gt; confirm /scan /report /autonomous /leverage /symbol /marginmode /positionmode /models /setmodels /harness /skill|/skills /soul /mcp /thinking /memory /resume /connect /ask /diag');
           return true;
         }
         case 'status': {
@@ -204,6 +204,13 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           if (!positionList || positionList.length) return usage(chatId, 'Cannot change symbol while positions are open.');
           applySettings(CONFIG, { symbol });
           await sendMessage(chatId, `symbol <code>${esc(CONFIG.symbol)}</code>`);
+          return true;
+        }
+        case 'autonomous': {
+          if (!agentState) return usage(chatId, 'The autonomous loop is not available in this runtime.');
+          const next = parseBoolean(arg, !agentState.autonomous, 'autonomous');
+          agentState.autonomous = next;
+          await sendMessage(chatId, `autonomous agent <code>${next ? 'on' : 'off'}</code> — looks at each new signal every ${CONFIG.AGENT_AUTONOMOUS_INTERVAL_SEC}s`);
           return true;
         }
         case 'marginmode': {
@@ -349,8 +356,77 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           return true;
         }
         case 'memory': {
-          await sendMessage(chatId, `memory keys: <code>${esc(Object.keys(agent?.memory?.all?.() || {}).join(', ') || '-')}</code>`);
-          return true;
+          const store = agent?.memory?.all?.() || {};
+          const [action = 'list', key, ...value] = rest;
+          if (action === 'list' || !action) {
+            const keys = Object.keys(store);
+            await sendMessage(chatId, keys.length
+              ? `<b>Memory keys</b>\n${keys.map(item => `<code>${esc(item)}</code>`).join('\n')}\n\n/memory get KEY · /memory set KEY text · /memory del KEY`
+              : 'Memory is empty.');
+            return true;
+          }
+          if (action === 'get') {
+            if (!key) return usage(chatId, 'Usage: /memory get KEY');
+            const value = await agent.memory.recall(key);
+            if (value === null || value === undefined) return usage(chatId, `No memory key <code>${esc(key)}</code>.`);
+            await sendMessage(chatId, `<code>${esc(key)}</code>:\n${esc(typeof value === 'string' ? value : JSON.stringify(value, null, 2))}`);
+            return true;
+          }
+          if (action === 'set') {
+            if (!key || !rest.length) return usage(chatId, 'Usage: /memory set KEY text');
+            await agent.memory.remember(key, value.join(' '));
+            await sendMessage(chatId, `memory <code>${esc(key)}</code> saved`);
+            return true;
+          }
+          if (action === 'del' || action === 'remove') {
+            if (!key) return usage(chatId, 'Usage: /memory del KEY');
+            await agent.memory.remember(key, null);
+            await sendMessage(chatId, `memory <code>${esc(key)}</code> cleared`);
+            return true;
+          }
+          return usage(chatId, 'Usage: /memory [list|get|set|del] [KEY] [text]');
+        }
+        case 'connect': {
+          const [action = '', key = ''] = rest;
+          if (action === 'list' || !action) {
+            const rows = ['openai', 'anthropic', 'google'].map(provider => {
+              const keyVar = providerKeyVar(provider);
+              const modelVar = providerModelVar(provider);
+              const key = String(CONFIG[keyVar] || '');
+              return `${provider}\n  key <code>${esc(keyVar)}</code> ${key ? `set (${key.length} chars)` : 'not set'}\n  url <code>${esc(CONFIG[`${provider === 'openai' ? 'AI' : provider === 'google' ? 'GEMINI' : 'ANTHROPIC'}_BASE_URL`] || 'default')}</code>\n  model <code>${esc(CONFIG[modelVar] || 'AUTO')}</code>`;
+            });
+            await sendMessage(chatId, `<b>Providers</b> (AI_PROVIDER=<code>${esc(CONFIG.AI_PROVIDER)}</code>)\n${rows.join('\n\n')}\n\n/connect provider auto|openai|anthropic|google\n/connect model NAME|AUTO\n/connect key PROVIDER VALUE\nKeys live in memory only and are gone on restart.`);
+            return true;
+          }
+          if (action === 'provider') {
+            const provider = String(key).trim().toLowerCase();
+            if (!['auto', 'openai', 'anthropic', 'google'].includes(provider)) return usage(chatId, 'Usage: /connect provider auto|openai|anthropic|google');
+            CONFIG.AI_PROVIDER = provider;
+            resetOpenAiModelCache();
+            await sendMessage(chatId, `AI_PROVIDER=<code>${esc(provider)}</code>`);
+            return true;
+          }
+          if (action === 'model') {
+            const model = String(key).trim();
+            if (!model) return usage(chatId, 'Usage: /connect model NAME|AUTO');
+            let provider;
+            try { provider = primaryProviderName(); } catch (error) { return usage(chatId, error.message); }
+            CONFIG[providerModelVar(provider)] = model.toUpperCase() === 'AUTO' ? 'AUTO' : model;
+            resetOpenAiModelCache();
+            await sendMessage(chatId, `${esc(provider)} model = <code>${esc(CONFIG[providerModelVar(provider)])}</code>`);
+            return true;
+          }
+          if (action === 'key') {
+            const provider = String(key || '').trim().toLowerCase();
+            const secret = value.join(' ').trim();
+            if (!['openai', 'anthropic', 'google'].includes(provider)) return usage(chatId, 'Usage: /connect key PROVIDER VALUE');
+            if (!secret) return usage(chatId, 'The key cannot be empty.');
+            CONFIG[providerKeyVar(provider)] = secret;
+            resetOpenAiModelCache();
+            await sendMessage(chatId, `${esc(provider)} key set for this session. Write it to .env to keep it.`);
+            return true;
+          }
+          return usage(chatId, 'Usage: /connect [list|provider|model|key]');
         }
         case 'resume': {
           if (!loadSession) {

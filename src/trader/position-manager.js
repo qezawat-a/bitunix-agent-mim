@@ -252,10 +252,13 @@ export class PositionManager {
       const result = await this.placeTPSL(position.positionId, Number(position.avgPrice), direction, position.atr, this.settings.min_confidence);
       return { placed: true, result };
     } catch (error) {
+      this.state.lastProtectionError = { positionId: key, message: error.message, at: Date.now() };
       if (this.settings.on_tpsl_failure === 'close') {
         const closeResult = await this.client.closePosition(this.symbol, position.positionId, position);
         return { closed: true, result: closeResult, error: error.message };
       }
+      // 'cancel' and 'alert' are the same thing here: an unprotected position
+      // left in place and reported. Retrying is throttled by protectionAttempts.
       throw new Error(`TP/SL protection failed: ${error.message}`);
     }
   }

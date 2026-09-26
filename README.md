@@ -45,17 +45,25 @@ the code. `/models` shows what the provider returned plus which model is active.
 
 - Bitunix USDT-M futures REST + WebSocket client, including documented
   pagination, TP/SL, batch-order, copy-trading, and private push channels
-- 10 strategies: EMA trend, RSI momentum, MACD cross, volume confirmation,
-  price momentum, ADX strength, Bollinger, funding-rate, Super Trend, ATR breakout
-- Multi-timeframe signal gate (`1m`, `3m`, `5m`, `15m`, `1h`): min confidence, tf confidence, agreement,
-  confirm scans, cooldown
-- Dynamic ATR-based TP/SL, breakeven, trailing, liquidation-distance guard
+- A committee of 10 weighted strategies, each voting +1/-1/0 with a stated
+  reason: EMA, RSI, MACD, Bollinger, Momentum, Super Trend, ATR Breakout, Volume,
+  ADX and Funding Rate. Confidence is the real weighted consensus, and
+  `min_agreeing_strategies` counts strategies that back the direction — not
+  timeframes.
+- Multi-timeframe signal gate (`1m`, `3m`, `5m`, `15m`, `1h`): min confidence,
+  tf confidence, strategy agreement, confirm scans, cooldown
+- Dynamic ATR-based TP/SL sized from the live signal's own strength, with
+  breakeven, trailing, and a liquidation-room guard
+- Reversal: a hard opposite read closes the position and reports it to the agent
 - Bitunix order units: `cost` (Cost Value), `qty` (Quantity Value), and
   `position_size` (Nominal Value); leverage affects Cost Value sizing only
-- Autonomous agent loop with thinking levels, model auto-refresh, sessions
-- Telegram bot: `/status`, `/start`, `/stop`, `/settings`,
-  `/memory`, `/resume`, `/models`, `/setModels`, `/harness`,
-  `/skills` (or `/skils`), `/soul` (or `/sould`), `/mcp`, and `/ask`
+- Autonomous agent loop (nudged once per *new* signal, not once per tick) with
+  thinking levels, model auto-refresh on rate limit, and session resume
+- Telegram bot: `/status`, `/start`, `/stop`, `/settings`, `/set`, `/get`,
+  `/signal`, `/balance`, `/positions`, `/trades`, `/pnl`, `/close`, `/close_all`,
+  `/scan`, `/report`, `/autonomous`, `/leverage`, `/symbol`, `/marginmode`,
+  `/positionmode`, `/models`, `/setmodels`, `/connect`, `/harness`, `/skill`,
+  `/soul`, `/mcp`, `/thinking`, `/memory`, `/resume`, `/ask`, `/diag`
 - Telegram Web App control panel served at `/app` locally; set `MINI_APP_URL`
   to its public HTTPS deployment to enable the Telegram menu button
 - JSONL harness via `npm run harness` and `/harness {"id":1,"message":"status"}`
@@ -88,7 +96,6 @@ src/
 │   ├── ws.js
 │   ├── indicators.js
 │   ├── scanner.js
-│   ├── risk.js
 │   └── futures-tools.js
 ├── trader/
 │   ├── trader.js
@@ -110,3 +117,9 @@ tests/
 
 Never commit `.env`. Bitunix API keys are mandatory: the bot refuses to start
 without them, because it has no dry-run mode to fall back to.
+
+The scanner never places an order. It produces a confirmed signal, and the agent
+decides what to do with it — so a strategy bug cannot open a position on its own.
+`/stop` halts the scan and autonomous loops; the agent still answers chat.
+Position-level safety (TP/SL, breakeven, trailing, the liquidation guard) is
+applied to whatever is open, however it got there.

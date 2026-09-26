@@ -692,6 +692,52 @@ describe('tool safety', () => {
 
 });
 
+// config.js reads process.env at module load, so the schema is checked against
+// a module instance loaded fresh with the variables already in place.
+async function loadFreshConfig() {
+  const url = new URL('../src/config.js', import.meta.url);
+  return import(`${url.href}?envschema=${Math.random()}`);
+}
+
+describe('environment schema', () => {
+  it('prefers the documented provider names and keeps the old ones as aliases', async () => {
+    const saved = {};
+    for (const name of [
+      'OPENAI_COMPATIBLE_KEY', 'OPENAI_COMPATIBLE_URL', 'OPENAI_COMPATIBALE_MODEL',
+      'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'BASE_URL',
+      'GEMINI_GOOGLE_KEY', 'GEMINI_GOOGLE_URL', 'GEMINI_GOOGLE_MODEL',
+      'AI_API_KEY', 'AI_BASE_URL', 'AI_MODEL', 'GEMINI_API_KEY', 'GEMINI_BASE_URL', 'GEMINI_MODEL',
+    ]) {
+      saved[name] = process.env[name];
+      delete process.env[name];
+    }
+    try {
+      process.env.OPENAI_COMPATIBLE_KEY = 'oc-key';
+      process.env.OPENAI_COMPATIBLE_URL = 'https://gateway.test/v1';
+      process.env.OPENAI_COMPATIBALE_MODEL = 'AUTO';
+      process.env.GEMINI_GOOGLE_KEY = 'gemini-key';
+      process.env.BASE_URL = 'https://proxy.test/anthropic';
+      const { CONFIG: fresh } = await loadFreshConfig();
+      assert.equal(fresh.AI_API_KEY, 'oc-key');
+      assert.equal(fresh.AI_BASE_URL, 'https://gateway.test/v1');
+      assert.equal(fresh.AI_MODEL, 'AUTO');
+      assert.equal(fresh.GEMINI_API_KEY, 'gemini-key');
+      assert.equal(fresh.ANTHROPIC_BASE_URL, 'https://proxy.test/anthropic');
+
+      // The old spelling still works when the new one is absent.
+      delete process.env.OPENAI_COMPATIBLE_KEY;
+      process.env.AI_API_KEY = 'legacy-key';
+      const { CONFIG: legacy } = await loadFreshConfig();
+      assert.equal(legacy.AI_API_KEY, 'legacy-key');
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+});
+
 describe('provider and websocket safety', () => {
   it('auto-selects a discovered model without a hardcoded fallback', async () => {
     Object.assign(CONFIG, { AI_PROVIDER: 'openai', AI_BASE_URL: 'https://auto-provider.test/v1', AI_API_KEY: 'test-key', AI_MODEL: 'AUTO' });
