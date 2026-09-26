@@ -143,11 +143,22 @@ describe('safety configuration', () => {
   it('migrates legacy settings while ignoring secret and unknown fields', () => {
     const target = { ...getTraderSettings(CONFIG) };
     applyPersistedSettings(target, { symbol: 'ETHUSDT', leverage: 12, BITUNIX_API_SECRET: 'secret', unknown: 'value', dry_run: false, auto_trade: true });
-    assert.equal(target.symbol, 'BTCUSDT');
+    // The symbol is a real setting and is validated on the way back in, so a
+    // redeploy restores the pair the user picked instead of reverting to .env.
+    assert.equal(target.symbol, 'ETHUSDT');
     assert.equal(target.leverage, 12);
     assert.equal(Object.hasOwn(target, 'dry_run'), false);
     assert.equal(Object.hasOwn(target, 'auto_trade'), false);
     assert.equal(Object.hasOwn(target, 'BITUNIX_API_SECRET'), false);
+  });
+
+  it('refuses a stored symbol that would never validate', () => {
+    // A hand-edited or corrupted store must not be able to inject a symbol the
+    // exchange would reject; the bad value is dropped, the good ones survive.
+    const target = { ...getTraderSettings(CONFIG) };
+    applyPersistedSettings(target, { symbol: 'not a pair!', leverage: 7 });
+    assert.equal(target.symbol, CONFIG.symbol);
+    assert.equal(target.leverage, 7);
   });
 
   it('keeps good saved settings when one stored value is bad', () => {
@@ -187,8 +198,22 @@ describe('safety configuration', () => {
     const publicSettings = getTraderSettings(CONFIG);
     assert.equal(Object.hasOwn(publicSettings, 'BITUNIX_API_SECRET'), false);
     const persistent = getPersistentSettings(CONFIG);
-    assert.equal(Object.hasOwn(persistent, 'symbol'), false);
+    // The symbol persists so a redeploy does not reset it; credentials still
+    // must not, and getTraderSettings is the only place that can leak them.
+    assert.equal(Object.hasOwn(persistent, 'symbol'), true);
     assert.equal(Object.hasOwn(persistent, 'BITUNIX_API_SECRET'), false);
+  });
+
+  it('round-trips the symbol through persistence', () => {
+    // The regression that made the bot look like it reset on every deploy: a
+    // symbol chosen with /symbol was dropped on save and on restore, so the
+    // process came back on the .env pair with no error anywhere.
+    const source = { ...getTraderSettings(CONFIG), symbol: 'QUSDT' };
+    const persistent = getPersistentSettings(source);
+    assert.equal(persistent.symbol, 'QUSDT');
+    const restored = { ...getTraderSettings(CONFIG) };
+    applyPersistedSettings(restored, persistent);
+    assert.equal(restored.symbol, 'QUSDT');
   });
 });
 
@@ -469,7 +494,46 @@ describe('exchange safety', () => {
     trader.state.lastReport = 0;
     const report = await trader.report({});
     assert.match(report, /no open positions/);
+    // Nothing has been scanned yet, so the honest answer is still this one.
     assert.match(report, /waiting for first scan/);
+  });
+
+  it('reports the last real scan instead of claiming it has never scanned', async () => {
+    // The report timer can fire before the first scan resolves, and scanSignal
+    // also returns null during a cooldown. "waiting for first scan" on a bot
+    // that has been scanning for hours reads as a fault and sends the user
+    // hunting a bug that is not there.
+    const client = { getPendingPositions: async () => [], getTickers: async () => [] };
+    const trader = new Trader(client);
+    trader.positionManager = new PositionManager(client, 'QUSDT', { ...getTraderSettings(CONFIG) });
+    Object.assign(CONFIG, { symbol: 'QUSDT', report_interval_sec: 30 });
+    trader.state.lastReport = 0;
+    trader.state.lastScan = 'bearish 53% (ema, macd)';
+    const report = await trader.report({});
+    assert.match(report, /last scan bearish 53% \(ema, macd\)/);
+    assert.doesNotMatch(report, /waiting for first scan/);
+  });
+
+  it('trims the price to the precision of the pair being reported', async () => {
+    // The price shown must be trimmed with the *displayed* pair's rules. Reading
+    // them from CONFIG instead made a report about one pair render another's
+    // decimal count, which is how a 5-decimal price came out at 8 and looked
+    // like the wrong number.
+    const client = {
+      getPendingPositions: async () => [],
+      getSymbolRules: async (symbol) => (symbol === 'QUSDT' ? { quotePrecision: 2 } : { quotePrecision: 8 }),
+    };
+    const trader = new Trader(client);
+    trader.positionManager = new PositionManager(client, 'QUSDT', { ...getTraderSettings(CONFIG) });
+    // CONFIG deliberately holds a different pair from the signal being reported.
+    Object.assign(CONFIG, { symbol: 'BTCUSDT', report_interval_sec: 30 });
+    trader.state.lastReport = 0;
+    const report = await trader.report({
+      lastSignal: { symbol: 'QUSDT', signal: 'bearish', price: '0.021317', confidence: 53, reason: 'no_entry' },
+    });
+    assert.match(report, /<code>QUSDT<\/code>/);
+    assert.match(report, /price <code>0\.02<\/code>/);
+    assert.doesNotMatch(report, /price <code>0\.02131700<\/code>/);
   });
 
   it('sorts klines by open time so the newest close is last', async () => {

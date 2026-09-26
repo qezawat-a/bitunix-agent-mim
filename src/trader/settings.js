@@ -230,10 +230,14 @@ export function getTraderSettings(source = CONFIG) {
   return Object.fromEntries(SETTING_KEYS.map(key => [key, Array.isArray(source[key]) ? [...source[key]] : source[key]]));
 }
 
+// The symbol is a trader setting like any other and is validated as one
+// (`/^[A-Z0-9]{5,32}$/`). It used to be stripped here on save and again on
+// restore, so every redeploy silently reverted /symbol to the .env default and
+// the user saw their whole configuration "reset". The only reason to drop a
+// setting from persistence is that it cannot be validated on the way back, and
+// the symbol can be.
 export function getPersistentSettings(source = CONFIG) {
-  const settings = getTraderSettings(source);
-  delete settings.symbol;
-  return settings;
+  return getTraderSettings(source);
 }
 
 export function applySettings(target, patch) {
@@ -255,7 +259,6 @@ export function applyPersistedSettings(target, stored) {
     if (SETTING_KEY_SET.has(canonical)) filtered[canonical] = value;
   }
   const normalized = normalizePatch(filtered);
-  delete normalized.symbol;
   const next = { ...getTraderSettings(target), ...normalized };
   const { accepted, rejected } = acceptValidSettings(next);
   if (rejected.length) console.warn(`[settings] dropping invalid saved value(s): ${rejected.join('; ')}`);

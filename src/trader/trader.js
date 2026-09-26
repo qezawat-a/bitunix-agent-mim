@@ -359,13 +359,15 @@ export class Trader {
   // for the next report.
   // A price is only useful at the precision the pair trades at, so it comes
   // from the same trading_pairs lookup the order path uses. A pair with 5
-  // decimals must not be reported to 8.
-  async formatPrice(value) {
+  // decimals must not be reported to 8. The symbol is the one being displayed,
+  // not whatever CONFIG currently holds, or a report about the previous pair
+  // gets trimmed to the wrong precision.
+  async formatPrice(value, symbol = CONFIG.symbol) {
     if (!validPositive(value)) return null;
     const number = Number(value);
     let decimals = 8;
     try {
-      const rules = await this.client.getSymbolRules(CONFIG.symbol);
+      const rules = await this.client.getSymbolRules(symbol);
       if (Number.isInteger(rules?.quotePrecision)) decimals = rules.quotePrecision;
     } catch {}
     return number.toFixed(decimals);
@@ -376,14 +378,20 @@ export class Trader {
     if (now < this.state.lastReport + CONFIG.report_interval_sec * 1000) return null;
     this.state.lastReport = now;
     const stamp = new Date(now).toISOString().replace('T', ' ').slice(0, 19);
-    const price = await this.formatPrice(lastSignal?.price ?? lastSignal?.lastPrice ?? this.state.lastPrice);
     const symbol = lastSignal?.symbol || CONFIG.symbol;
     const lines = [`<b>${stamp} UTC</b>  <code>${escText(symbol)}</code>`];
+    const price = await this.formatPrice(lastSignal?.price ?? lastSignal?.lastPrice ?? this.state.lastPrice, symbol);
     if (price) lines.push(`price <code>${escText(price)}</code>`);
     if (lastSignal) {
       const verdict = lastSignal.reason === 'awaiting_agent' ? 'actionable' : 'no entry';
       lines.push(`signal <b>${escText(lastSignal.signal)}</b> ${Math.round(Number(lastSignal.confidence) || 0)}% (${verdict})`);
       if (lastSignal.agreeingStrategies?.length) lines.push(`backed by ${escText(lastSignal.agreeingStrategies.join(', '))}`);
+    } else if (this.state.lastScan) {
+      // The scan loop runs on a timer, so a tick can land before the first scan
+      // resolves. Report what was actually last seen rather than claiming the
+      // bot has never scanned — "waiting for first scan" on a live bot reads as
+      // a fault when it is just a cold start.
+      lines.push(`last scan ${escText(this.state.lastScan)}`);
     } else {
       lines.push('signal <b>waiting for first scan</b>');
     }
@@ -410,7 +418,7 @@ export class Trader {
       }
       if (pnl !== null) totalPnl += pnl;
       const pnlText = pnl === null ? 'pnl n/a' : `pnl ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)}`;
-      const mark = await this.formatPrice(position.markPrice);
+      const mark = await this.formatPrice(position.markPrice, position.symbol || symbol);
       lines.push(`${escText(position.positionId)} ${escText(position.side)} qty <code>${escText(String(position.size ?? '-'))}</code> mark <code>${escText(mark ?? '-')}</code> ${pnlText}`);
     }
     lines.push(`total pnl ${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(4)} ${CONFIG.margin_coin || 'USDT'}`);
