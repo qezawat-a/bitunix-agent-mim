@@ -8,6 +8,7 @@
     "start": "node src/main.js",
     "agent": "node src/agent/tui.js",
     "harness": "node src/harness.js",
+    "simulate:gateway": "node scripts/simulate-gateway.js",
     "test": "node --test --test-concurrency=1 tests/*.test.js"
   },
   "dependencies": {

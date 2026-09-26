@@ -1,7 +1,7 @@
 import { CONFIG } from '../config.js';
 import { parseThinkingLevel } from './thinking.js';
-import { chat } from './brain.js';
-import { detectProviders } from './config.js';
+import { chat, describeModelConfig } from './brain.js';
+import { primaryProviderName, providerKeyVar } from './config.js';
 import { withTimeout, validateToolArguments, stringifyToolResult } from './tools.js';
 
 function resolveSystem(agent) {
@@ -65,9 +65,13 @@ async function callModel(agent, messages, provider, tools) {
   let lastError;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const response = await withTimeout(signal => chat(messages, provider, tools, { signal }), 60000);
+      const response = await withTimeout(
+        signal => chat(messages, provider, tools, { signal, thinkingLevel: agent.thinkingLevel }),
+        60000,
+      );
       agent.lastResponse = response;
       if (response?.model) agent.lastModel = response.model;
+      if (response?.provider) agent.lastProvider = response.provider;
       agent.lastError = null;
       return response;
     } catch (error) {
@@ -89,37 +93,35 @@ export async function say(agent, text) {
   if (agent.autoCompact && agent.history.length > 40) agent.history = await agent.compactHistory(agent.history);
   agent.lastError = null;
 
-  let provider;
+  let provider = null;
   try {
-    provider = detectProviders();
+    provider = primaryProviderName();
     agent.lastProvider = provider;
   } catch (error) {
     agent.lastError = error.message;
     const reply = `Agent configuration error: ${error.message}`;
     agent.history.push({ role: 'assistant', content: reply });
-    return { role: 'assistant', content: reply };
+    return { role: 'assistant', content: reply, reply, error: agent.lastError };
   }
 
-  const hasKey = provider === 'openai'
-    ? Boolean(CONFIG.AI_API_KEY)
-    : provider === 'anthropic'
-      ? Boolean(CONFIG.ANTHROPIC_API_KEY)
-      : Boolean(CONFIG.GEMINI_API_KEY);
-  if (!hasKey) {
-    agent.lastError = `No API key configured for ${provider}`;
-    const reply = `AI key is not configured for ${provider}. Add the matching key to .env, restart, and send /diag.\n\nهیچ کلید LLM تنظیم نشده است.`;
+  const keyVar = providerKeyVar(provider);
+  if (keyVar && !String(CONFIG[keyVar] || '').trim()) {
+    agent.lastError = `No API key configured for ${provider} (${keyVar})`;
+    const reply = `AI key is not configured for ${provider}. Set ${keyVar} in .env, restart, and send /diag.\n\nهیچ کلید LLM تنظیم نشده است.`;
     agent.history.push({ role: 'assistant', content: reply });
-    return { role: 'assistant', content: reply };
+    return { role: 'assistant', content: reply, reply, error: agent.lastError };
   }
 
   const useTools = agent.tools.length > 0;
   let finalText = '';
   let hadToolCalls = false;
   let lastFinishReason = null;
+  let rounds = 0;
 
   try {
     const system = await resolveSystem(agent);
     for (let round = 0; round < (agent.maxRounds || 8); round++) {
+      rounds = round + 1;
       const messages = buildMessages(agent, provider, system);
       const res = await callModel(agent, messages, provider, useTools ? agent.tools : []);
       const text = responseText(res);
@@ -161,16 +163,26 @@ export async function say(agent, text) {
     }
   } catch (error) {
     agent.lastError = error.message || String(error);
-    finalText = `LLM error: ${agent.lastError}. Check /diag and /models.`;
+    finalText = `LLM error: ${agent.lastError}\n\nRun /diag to see the provider, the resolved model and the last failure.`;
   }
 
   if (!finalText) {
-    const detail = agent.lastError || (lastFinishReason ? `finish_reason=${lastFinishReason}` : hadToolCalls ? 'tool loop ended without a final answer' : 'empty provider response');
+    const detail = agent.lastError
+      || (lastFinishReason ? `finish_reason=${lastFinishReason}` : hadToolCalls ? 'tool loop ended without a final answer' : 'empty provider response');
     agent.lastError = detail;
-    finalText = `The LLM returned no text (${detail}). Check /diag and /models, then try again.`;
+    finalText = `The LLM returned no text (${detail}). Run /diag and /models, then try again.`;
   }
   agent.history.push({ role: 'assistant', content: finalText });
-  return { role: 'assistant', content: finalText };
+  const modelState = describeModelConfig();
+  return {
+    role: 'assistant',
+    content: finalText,
+    reply: finalText,           // CRAG-compatible alias
+    rounds,
+    provider: agent.lastProvider,
+    model: agent.lastModel || modelState.resolvedModel,
+    error: agent.lastError,
+  };
 }
 
 export function replaceHistory(history, newHistory) {

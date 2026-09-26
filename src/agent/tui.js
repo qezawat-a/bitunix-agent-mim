@@ -9,7 +9,7 @@ import { Memory } from './memory.js';
 import { listSkills, loadSkill, saveSkill, removeSkill } from './skills.js';
 import { buildSystemPrompt, readSoul, writeSoul, appendSoul } from '../prompt.js';
 import { loadMcpTools, disposeMcpTools } from './mcp.js';
-import { detectProviders } from './config.js';
+import { primaryProviderName } from './config.js';
 import { listAnthropicModels, listGeminiModels, listOpenAiModels, resetOpenAiModelCache } from './brain.js';
 import { formatSettings, formatStatus, startTui } from '../ui/tui.js';
 
@@ -38,7 +38,7 @@ const getSystem = async () => buildSystemPrompt({ skills: await listSkills(), to
 const agent = createAgent({ system: getSystem, tools, memory, maxRounds: CONFIG.AGENT_MAX_STEP, autoCompact: true, thinkingLevel: CONFIG.AGENT_THINKING_LEVEL });
 
 async function modelList() {
-  const provider = detectProviders();
+  const provider = primaryProviderName();
   if (provider === 'openai') return listOpenAiModels();
   if (provider === 'anthropic') return listAnthropicModels();
   return listGeminiModels();
@@ -54,7 +54,7 @@ startTui({
     if (command === 'status' || command === 'tstatus') return formatStatus();
     if (command === 'models') return JSON.stringify(await modelList(), null, 2);
     if (command === 'setmodels') {
-      const provider = detectProviders();
+      const provider = primaryProviderName();
       const key = provider === 'openai' ? 'AI_MODEL' : provider === 'anthropic' ? 'ANTHROPIC_MODEL' : 'GEMINI_MODEL';
       const value = arg || 'AUTO';
       if (value.toUpperCase() !== 'AUTO' && !(await modelList()).includes(value)) return `Model is not available: ${value}`;

@@ -3,10 +3,17 @@ import { strictListFromData } from './bitunix/client.js';
 import { sendMessage, isOwner, esc, formatSignalReport } from './telegram-bot.js';
 import { applySettings, getTraderSettings, parseSettingValue, validateSettings } from './trader/settings.js';
 import { parseThinkingLevel } from './agent/thinking.js';
-import { detectProviders } from './agent/config.js';
-import { listAnthropicModels, listGeminiModels, listOpenAiModels, resetOpenAiModelCache } from './agent/brain.js';
+import { primaryProviderName, providerKeyVar, providerModelVar } from './agent/config.js';
+import { listAnthropicModels, listGeminiModels, listOpenAiModels, resetOpenAiModelCache, describeModelConfig } from './agent/brain.js';
 import { listSkills, loadSkill, removeSkill, saveSkill } from './agent/skills.js';
 import { appendSoul, readSoul, writeSoul } from './prompt.js';
+
+function listProviderModelsFor(provider) {
+  if (provider === 'openai') return listOpenAiModels();
+  if (provider === 'anthropic') return listAnthropicModels();
+  if (provider === 'google') return listGeminiModels();
+  return Promise.resolve([]);
+}
 
 function usage(chatId, text) {
   return sendMessage(chatId, text).then(() => true);
@@ -20,12 +27,6 @@ function parseHarnessInput(text) {
     }
   } catch {}
   return { id: null, message: text };
-}
-
-async function listProviderModels(provider) {
-  if (provider === 'openai') return listOpenAiModels();
-  if (provider === 'anthropic') return listAnthropicModels();
-  return listGeminiModels();
 }
 
 function markCooldown(trader) {
@@ -199,26 +200,30 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           return true;
         }
         case 'models': {
-          const provider = detectProviders();
-          const models = await listProviderModels(provider);
-          const configuredKey = provider === 'openai' ? 'AI_MODEL' : provider === 'anthropic' ? 'ANTHROPIC_MODEL' : 'GEMINI_MODEL';
+          let provider;
+          try { provider = primaryProviderName(); } catch { provider = 'none'; }
+          const models = provider === 'none' ? [] : await listProviderModelsFor(provider);
+          const configuredKey = providerModelVar(provider) || 'AI_MODEL';
           const configured = String(CONFIG[configuredKey] || '').toUpperCase() === 'AUTO' || !CONFIG[configuredKey]
             ? 'auto-detect'
             : models.includes(CONFIG[configuredKey]) ? 'configured' : 'not found';
-          await sendMessage(chatId, `<b>${esc(provider)} models</b>\nconfigured: <code>${esc(CONFIG[configuredKey])}</code> (${configured})\n${models.slice(0, 40).map(model => `<code>${esc(model)}</code>`).join('\n')}`);
+          const modelState = describeModelConfig();
+          const active = modelState.resolvedModel ? `\nactive: <code>${esc(modelState.resolvedModel)}</code> (${esc(modelState.source)}, ${modelState.candidateCount} candidates)` : '';
+          await sendMessage(chatId, `<b>${esc(provider)} models</b>\nconfigured: <code>${esc(CONFIG[configuredKey] || 'AUTO')}</code> (${configured})${active}\n${models.slice(0, 40).map(model => `<code>${esc(model)}</code>`).join('\n')}`);
           return true;
         }
         case 'setmodels': {
-          const provider = detectProviders();
+          let provider;
+          try { provider = primaryProviderName(); } catch (error) { return usage(chatId, error.message); }
           const requested = rest.join(' ').trim();
           const value = requested || 'AUTO';
           if (value.toUpperCase() !== 'AUTO') {
-            const models = await listProviderModels(provider);
+            const models = await listProviderModelsFor(provider);
             if (!models.includes(value)) {
               return usage(chatId, `Model is not available. Use one of: ${models.slice(0, 20).join(', ')}`);
             }
           }
-          const key = provider === 'openai' ? 'AI_MODEL' : provider === 'anthropic' ? 'ANTHROPIC_MODEL' : 'GEMINI_MODEL';
+          const key = providerModelVar(provider);
           CONFIG[key] = value.toUpperCase() === 'AUTO' ? 'AUTO' : value;
           resetOpenAiModelCache();
           await sendMessage(chatId, `${key} set to <code>${esc(CONFIG[key])}</code>.`);
@@ -340,11 +345,13 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
           return true;
         }
         case 'diag': {
-          const provider = detectProviders();
-          const modelKey = provider === 'openai' ? 'AI_MODEL' : provider === 'anthropic' ? 'ANTHROPIC_MODEL' : 'GEMINI_MODEL';
-          const keyName = provider === 'openai' ? 'AI_API_KEY' : provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'GEMINI_API_KEY';
-          const lastError = agent?.lastError ? String(agent.lastError).slice(0, 300) : 'none';
-          await sendMessage(chatId, `<b>Diag</b>\napi <code>${client ? 'ready' : 'missing'}</code>\ndb <code>${CONFIG.DATABASE_URL ? 'postgres' : 'file'}</code>\nws <code>configured</code>\nllm <code>${esc(provider)}</code> model <code>${esc(CONFIG[modelKey] || 'AUTO')}</code> resolved <code>${esc(agent?.lastModel || '-')}</code> key <code>${CONFIG[keyName] ? 'set' : 'missing'}</code>\nlast_error <code>${esc(lastError)}</code>`);
+          let provider = 'none';
+          try { provider = primaryProviderName(); } catch {}
+          const modelKey = providerModelVar(provider) || 'AI_MODEL';
+          const keyName = providerKeyVar(provider) || 'AI_API_KEY';
+          const lastError = agent?.lastError ? String(agent.lastError).slice(0, 600) : 'none';
+          const modelState = describeModelConfig();
+          await sendMessage(chatId, `<b>Diag</b>\napi <code>${client ? 'ready' : 'missing'}</code>\ndb <code>${CONFIG.DATABASE_URL ? 'postgres' : 'file'}</code>\nws <code>configured</code>\nllm <code>${esc(provider)}</code> base <code>${esc(modelState.baseUrl || '-')}</code>\nmodel <code>${esc(CONFIG[modelKey] || 'AUTO')}</code> resolved <code>${esc(agent?.lastModel || modelState.resolvedModel || '-')}</code> key <code>${CONFIG[keyName] ? 'set' : 'missing'}</code>\ncandidates <code>${modelState.candidateCount || 0}</code>\nlast_error <code>${esc(lastError)}</code>`);
           return true;
         }
         default:

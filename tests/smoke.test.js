@@ -1,5 +1,7 @@
-import { describe, it, afterEach } from 'node:test';
+import { describe, it, afterEach, after } from 'node:test';
 import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
 import { ema, rsi, bollinger, atr, macd, superTrend, atrBreakout, computeSignal } from '../src/bitunix/indicators.js';
 import {
   applyPersistedSettings,
@@ -19,8 +21,16 @@ import { Trader } from '../src/trader/trader.js';
 import { PositionManager } from '../src/trader/position-manager.js';
 import { setPositionManager, setTraderInstances, traderTools } from '../src/trader/agent-tools.js';
 import { bitunixTools, setBitunixClient } from '../src/bitunix/futures-tools.js';
-import { detectProviders } from '../src/agent/config.js';
-import { chat, listOpenAiModels, resolveOpenAiModelsUrl, resolveOpenAiUrl } from '../src/agent/brain.js';
+import { detectProviders, primaryProviderName } from '../src/agent/config.js';
+import { isAuthError, isBalanceError, rankModels, shouldAdvanceModel } from '../src/agent/auto-model.js';
+import {
+  chat,
+  describeModelConfig,
+  listOpenAiModels,
+  resetOpenAiModelCache,
+  resolveOpenAiModelsUrl,
+  resolveOpenAiUrl,
+} from '../src/agent/brain.js';
 import { createAgent } from '../src/agent/loop.js';
 import { stringifyToolResult, validateToolArguments } from '../src/agent/tools.js';
 import { splitHtml } from '../src/telegram-bot.js';
@@ -29,6 +39,8 @@ import { createTraderCommands } from '../src/telegram-trader.js';
 
 const originalConfig = { ...CONFIG, timeframes: [...CONFIG.timeframes] };
 const originalFetch = globalThis.fetch;
+const modelCacheFile = path.join(os.tmpdir(), `jrock-model-cache-${process.pid}.json`);
+process.env.AI_MODEL_CACHE_FILE = modelCacheFile;
 
 afterEach(() => {
   Object.assign(CONFIG, originalConfig, { timeframes: [...originalConfig.timeframes] });
@@ -36,6 +48,11 @@ afterEach(() => {
   setTraderInstances(null, null);
   setPositionManager(null);
   setBitunixClient(null);
+  resetOpenAiModelCache();
+});
+
+after(() => {
+  resetOpenAiModelCache();
 });
 
 function fakePosition(overrides = {}) {
@@ -520,6 +537,107 @@ describe('provider and websocket safety', () => {
     const result = await chat([{ role: 'user', content: 'hello' }], 'openai');
     assert.equal(result.text, 'ok');
     assert.equal(requests[1].body.model, 'standard');
+    assert.equal(describeModelConfig().resolvedModel, 'standard');
+  });
+
+  it('answers even when every availability probe fails', async () => {
+    // This is the reported production failure: /models lists 30+ models but no
+    // probe passes. The agent must still answer instead of going silent.
+    Object.assign(CONFIG, { AI_PROVIDER: 'openai', AI_BASE_URL: 'https://gw.test/v1', AI_API_KEY: 'test-key', AI_MODEL: 'AUTO' });
+    const asked = [];
+    globalThis.fetch = async (url, options) => {
+      if (url.endsWith('/models')) {
+        return { ok: true, json: async () => ({ data: [{ id: 'flash-a' }, { id: 'flash-b' }, { id: 'pro-c' }] }) };
+      }
+      const body = JSON.parse(options.body);
+      asked.push(body.model);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'salam, chetori?' } }] }) };
+    };
+    const agent = createAgent({ system: 'rules', tools: [] });
+    const reply = await agent.say('Hi');
+    assert.equal(reply.content, 'salam, chetori?');
+    assert.equal(reply.error, null);
+    // Probes run first, then the real request — the model is never swapped for a
+    // hardcoded name, and the best-ranked catalog entry is used.
+    assert.ok(asked.length >= 2);
+    assert.equal(asked[0], 'flash-a');
+    assert.equal(describeModelConfig().source, 'auto');
+  });
+
+  it('advances to the next model when the key is denied for one model', async () => {
+    // Sea-lion/OpenRouter style: HTTP 401 key_model_access_denied per model.
+    Object.assign(CONFIG, { AI_PROVIDER: 'openai', AI_BASE_URL: 'https://gw.test/v1', AI_API_KEY: 'test-key', AI_MODEL: 'AUTO' });
+    globalThis.fetch = async (url, options) => {
+      if (url.endsWith('/models')) return { ok: true, json: async () => ({ data: [{ id: 'model-one' }, { id: 'model-two' }] }) };
+      const body = JSON.parse(options.body);
+      const denied = { ok: false, status: 401, json: async () => ({ error: { message: 'key_model_access_denied' } }), text: async () => 'key_model_access_denied' };
+      if (body.model === 'model-one') return denied;
+      if (body.tools) return { ok: true, json: async () => ({ choices: [{ message: { content: 'pong' } }] }) };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'pong' } }] }) };
+    };
+    const result = await chat([{ role: 'user', content: 'ping' }], 'openai');
+    assert.equal(result.text, 'pong');
+    assert.equal(result.model, 'model-two');
+  });
+
+  it('fails fast on a rejected key instead of walking every model', async () => {
+    Object.assign(CONFIG, { AI_PROVIDER: 'openai', AI_BASE_URL: 'https://gw.test/v1', AI_API_KEY: 'bad-key', AI_MODEL: 'AUTO' });
+    const realRequests = [];
+    globalThis.fetch = async (url, options) => {
+      if (url.endsWith('/models')) return { ok: true, json: async () => ({ data: [{ id: 'model-a' }, { id: 'model-b' }] }) };
+      const body = JSON.parse(options.body);
+      // Tier-1 probes ask about the bot status, tier-2 probes say "ping", the
+      // real request echoes the user text.
+      if (body.messages.at(-1)?.content === 'hi') realRequests.push(body.model);
+      return { ok: false, status: 401, json: async () => ({ error: { message: 'invalid api key' } }), text: async () => 'invalid api key' };
+    };
+    await assert.rejects(() => chat([{ role: 'user', content: 'hi' }], 'openai'), /invalid api key/);
+    assert.equal(new Set(realRequests).size, 1, 'the key itself is broken, so no second model is worth trying');
+  });
+
+  it('reports an empty catalog instead of guessing a model name', async () => {
+    Object.assign(CONFIG, { AI_PROVIDER: 'openai', AI_BASE_URL: 'https://gw.test/v1', AI_API_KEY: 'test-key', AI_MODEL: 'AUTO' });
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ data: [] }) });
+    await assert.rejects(() => chat([{ role: 'user', content: 'hi' }], 'openai'), /catalog came back empty/);
+  });
+
+  it('classifies per-model failures without switching on rate limits', () => {
+    assert.equal(isBalanceError(403, 'key_model_access_denied'), true);
+    assert.equal(isBalanceError(401, 'key_model_access_denied'), true);
+    assert.equal(isBalanceError(402, 'insufficient_quota'), true);
+    assert.equal(isBalanceError(429, 'rate limit'), false);
+    assert.equal(isAuthError(401, 'invalid api key'), true);
+    assert.equal(isAuthError(401, 'key_model_access_denied'), false);
+    assert.equal(shouldAdvanceModel(404, 'model_not_found'), true);
+    assert.equal(shouldAdvanceModel(429, 'rate limit'), false);
+    assert.equal(shouldAdvanceModel(400, 'unsupported model'), true);
+  });
+
+  it('ranks the catalog free tier first and filters non-chat models', () => {
+    const ranked = rankModels([
+      'kc/openai/gpt-4.1',
+      'ag/text-embedding-3-large',
+      'kc/nvidia/nemotron:free',
+      'ag/gemini-3.5-flash',
+    ]);
+    assert.equal(ranked[0], 'kc/nvidia/nemotron:free');
+    assert.ok(!ranked.some(id => id.includes('embedding')));
+    assert.equal(ranked.indexOf('ag/gemini-3.5-flash') < ranked.indexOf('kc/openai/gpt-4.1'), true);
+  });
+
+  it('sends a normal reply to a plain chat message', async () => {
+    // The exact reported symptom: a plain Persian message must get a reply.
+    Object.assign(CONFIG, { AI_PROVIDER: 'openai', AI_BASE_URL: 'https://gw.test/v1', AI_API_KEY: 'test-key', AI_MODEL: 'AUTO' });
+    globalThis.fetch = async (url, options) => {
+      if (url.endsWith('/models')) return { ok: true, json: async () => ({ data: [{ id: 'chat-model' }] }) };
+      const body = JSON.parse(options.body);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'سلام! چطور می‌تونم کمک کنم؟' } }] }) };
+    };
+    const agent = createAgent({ system: 'rules', tools: [] });
+    const reply = await agent.say('سلام');
+    assert.match(reply.content, /سلام/);
+    assert.doesNotMatch(reply.content, /Hichi bar nagasht/);
+    assert.equal(reply.model, 'chat-model');
   });
 
   it('lists models from an OpenAI-compatible endpoint', async () => {
@@ -540,7 +658,8 @@ describe('provider and websocket safety', () => {
 
   it('auto-selects an available provider', () => {
     Object.assign(CONFIG, { AI_PROVIDER: 'auto', AI_API_KEY: '', ANTHROPIC_API_KEY: 'anthropic-key', GEMINI_API_KEY: '' });
-    assert.equal(detectProviders(), 'anthropic');
+    assert.equal(primaryProviderName(), 'anthropic');
+    assert.deepEqual(detectProviders().map(p => p.name), ['anthropic']);
   });
 
   it('sends system and tool definitions to Anthropic and Gemini', async () => {
@@ -553,10 +672,14 @@ describe('provider and websocket safety', () => {
     const tools = [{ name: 'probe', description: 'probe', parameters: { type: 'object', properties: {} } }];
     await chat([{ role: 'system', content: 'rules' }, { role: 'user', content: 'hello' }], 'anthropic', tools);
     await chat([{ role: 'system', content: 'rules' }, { role: 'user', content: 'hello' }], 'google', tools);
+    // Anthropic keeps its native shape.
     assert.equal(bodies[0].system, 'rules');
     assert.equal(bodies[0].tools[0].name, 'probe');
-    assert.equal(bodies[1].systemInstruction.parts[0].text, 'rules');
-    assert.equal(bodies[1].tools[0].functionDeclarations[0].name, 'probe');
+    assert.equal(bodies[0].input_schema, undefined);
+    // Google is called over the OpenAI-compatible route, so system is a message.
+    assert.equal(bodies[1].messages[0].role, 'system');
+    assert.equal(bodies[1].messages[0].content, 'rules');
+    assert.equal(bodies[1].tools[0].function.name, 'probe');
   });
 
   it('executes Anthropic tool calls through the shared loop', async () => {

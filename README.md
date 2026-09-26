@@ -16,8 +16,26 @@ npm start
 
 Default safety: `DRY_RUN=1`. Real Bitunix orders are sent only after you
 explicitly switch with `/dryrun 0` and enable `/autotrade on` in Telegram.
-`AI_MODEL=AUTO` discovers and probes models from the configured provider
-endpoint; there are no baked-in fallback model IDs.
+
+## Model selection (`AI_MODEL=AUTO`)
+
+Ported from the CRAG agent, so the bot keeps talking instead of going quiet:
+
+1. Every provider that has a key is a candidate (`AI_PROVIDER=auto`).
+2. An explicitly configured model is used as-is — no probing.
+3. With `AUTO` the catalog is read from `<base>/models`, ranked
+   (free → cheap → rest, best family first, non-chat models filtered out) and
+   each candidate is probed: first for a real tool call, then for any text reply.
+4. If **no** probe passes, the best-ranked candidate is still used — a failed
+   probe is not proof the model is broken. A rejected model (402/403 access
+   denied, 404 unknown model, quota) automatically advances to the next one, and
+   models the key may not use are skipped instead of retried.
+5. A rejected *key* (401 invalid key) fails fast with the provider's own message.
+6. The winning model is remembered in `data/model-cache.json`, so restarts do not
+   re-probe. There are no hardcoded fallback model IDs anywhere.
+
+`/models` shows the catalog plus the resolved model; `/diag` shows the provider,
+base URL, configured and resolved model, and the last real error.
 
 ## Main features
 

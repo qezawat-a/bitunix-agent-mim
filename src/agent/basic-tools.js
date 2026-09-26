@@ -1,5 +1,5 @@
 import { CONFIG } from '../config.js';
-import { detectProviders } from './config.js';
+import { primaryProviderName } from './config.js';
 import { listAnthropicModels, listGeminiModels, listOpenAiModels } from './brain.js';
 import { listSkills } from './skills.js';
 import { readSoul } from '../prompt.js';
@@ -104,7 +104,8 @@ export const basicTools = [
     description: 'List models discovered from the configured provider',
     parameters: { type: 'object', properties: {} },
     async handler() {
-      const provider = detectProviders();
+      let provider;
+      try { provider = primaryProviderName(); } catch (error) { return { provider: null, models: [], error: error.message }; }
       try {
         const models = provider === 'openai'
           ? await listOpenAiModels()
