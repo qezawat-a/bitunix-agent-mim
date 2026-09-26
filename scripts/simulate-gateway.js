@@ -6,7 +6,6 @@ import { CONFIG } from '../src/config.js';
 import { createAgent } from '../src/agent/loop.js';
 import { describeModelConfig } from '../src/agent/brain.js';
 
-process.env.AI_MODEL_CACHE_FILE = '/tmp/opencode/sim-model-cache.json';
 
 const CATALOG = [
   'ag/gemini-3.8-flash-high', 'ag/gemini-3.8-flash-medium', 'ag/gemini-3.8-flash-low',

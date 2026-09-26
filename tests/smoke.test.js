@@ -1,7 +1,6 @@
-import { describe, it, afterEach, after } from 'node:test';
+import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import os from 'node:os';
-import path from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { ema, rsi, bollinger, atr, macd, superTrend, atrBreakout, computeSignal } from '../src/bitunix/indicators.js';
 import {
   applyPersistedSettings,
@@ -22,7 +21,7 @@ import { PositionManager } from '../src/trader/position-manager.js';
 import { setPositionManager, setTraderInstances, traderTools } from '../src/trader/agent-tools.js';
 import { bitunixTools, setBitunixClient } from '../src/bitunix/futures-tools.js';
 import { detectProviders, primaryProviderName } from '../src/agent/config.js';
-import { isAuthError, isBalanceError, rankModels, shouldAdvanceModel } from '../src/agent/auto-model.js';
+import { isAuthError, isBalanceError, shouldAdvanceModel } from '../src/agent/auto-model.js';
 import {
   chat,
   describeModelConfig,
@@ -40,8 +39,7 @@ import { createTraderCommands } from '../src/telegram-trader.js';
 
 const originalConfig = { ...CONFIG, timeframes: [...CONFIG.timeframes] };
 const originalFetch = globalThis.fetch;
-const modelCacheFile = path.join(os.tmpdir(), `jrock-model-cache-${process.pid}.json`);
-process.env.AI_MODEL_CACHE_FILE = modelCacheFile;
+
 
 afterEach(() => {
   Object.assign(CONFIG, originalConfig, { timeframes: [...originalConfig.timeframes] });
@@ -49,10 +47,6 @@ afterEach(() => {
   setTraderInstances(null, null);
   setPositionManager(null);
   setBitunixClient(null);
-  resetOpenAiModelCache();
-});
-
-after(() => {
   resetOpenAiModelCache();
 });
 
@@ -614,18 +608,6 @@ describe('provider and websocket safety', () => {
     assert.equal(shouldAdvanceModel(400, 'unsupported model'), true);
   });
 
-  it('ranks the catalog free tier first and filters non-chat models', () => {
-    const ranked = rankModels([
-      'kc/openai/gpt-4.1',
-      'ag/text-embedding-3-large',
-      'kc/nvidia/nemotron:free',
-      'ag/gemini-3.5-flash',
-    ]);
-    assert.equal(ranked[0], 'kc/nvidia/nemotron:free');
-    assert.ok(!ranked.some(id => id.includes('embedding')));
-    assert.equal(ranked.indexOf('ag/gemini-3.5-flash') < ranked.indexOf('kc/openai/gpt-4.1'), true);
-  });
-
   it('sends a normal reply to a plain chat message', async () => {
     // The exact reported symptom: a plain Persian message must get a reply.
     Object.assign(CONFIG, { AI_PROVIDER: 'openai', AI_BASE_URL: 'https://gw.test/v1', AI_API_KEY: 'test-key', AI_MODEL: 'AUTO' });
@@ -673,7 +655,7 @@ describe('provider and websocket safety', () => {
     );
   });
 
-  it('keeps the last good catalog when a later read fails', async () => {
+  it('keeps the resolved model in memory only, never on disk', async () => {
     Object.assign(CONFIG, { AI_PROVIDER: 'openai', AI_BASE_URL: 'https://flaky.test/v1', AI_API_KEY: 'k', AI_MODEL: 'AUTO' });
     let calls = 0;
     globalThis.fetch = async (url) => {
@@ -684,11 +666,43 @@ describe('provider and websocket safety', () => {
       }
       return { ok: true, json: async () => ({ choices: [{ message: { content: 'pong' } }] }) };
     };
-    await chat([{ role: 'user', content: 'hi' }], 'openai');
-    resetModelState();                     // in-process state gone, on-disk winner stays
-    const result = await chat([{ role: 'user', content: 'hi again' }], 'openai');
-    assert.equal(result.text, 'pong');
-    assert.equal(result.model, 'good-model');
+    const first = await chat([{ role: 'user', content: 'hi' }], 'openai');
+    assert.equal(first.model, 'good-model');
+    // The same process reuses what it resolved — no second catalog read.
+    const second = await chat([{ role: 'user', content: 'hi again' }], 'openai');
+    assert.equal(second.model, 'good-model');
+    assert.equal(calls, 1);
+    // A reset means the provider is asked again, not a file on disk.
+    resetModelState();
+    await assert.rejects(() => chat([{ role: 'user', content: 'again' }], 'openai'), /no models came back/);
+  });
+
+  it('ships no model list, ranking, or fallback anywhere in the agent', async () => {
+    const files = ['auto-model.js', 'brain.js', 'config.js'];
+    for (const name of files) {
+      const source = await readFile(new URL(`../src/agent/${name}`, import.meta.url), 'utf8');
+      // Hardcoded model ids and family/ranking tables must not exist.
+      assert.doesNotMatch(source, /DEFAULT_CANDIDATES|FALLBACK_MODEL|PREFERRED_FAMILIES|NON_CHAT_MARKERS|CHEAP_MARKERS/);
+      assert.doesNotMatch(source, /'gpt-[0-9]|'o3'|'claude-|'gemini-|'deepseek-|'llama-|'qwen-/);
+      assert.doesNotMatch(source, /model-cache\.json|loadModelCache|saveModelCache|AI_MODEL_CACHE_FILE/);
+    }
+  });
+
+  it('uses the provider order and never substitutes a model of its own', async () => {
+    Object.assign(CONFIG, { AI_PROVIDER: 'openai', AI_BASE_URL: 'https://raw.test/v1', AI_API_KEY: 'k', AI_MODEL: 'AUTO' });
+    const asked = [];
+    // Deliberately unsorted and "unusual" ids: none of them may be reordered,
+    // filtered out, or replaced by a name the code knows.
+    const catalog = ['zzz-unknown-9', 'aaa-odd-name', 'text-embedding-3-large', 'mmm-third'];
+    globalThis.fetch = async (url, options) => {
+      if (String(url).endsWith('/models')) return { ok: true, json: async () => ({ data: catalog.map(id => ({ id })) }) };
+      asked.push(JSON.parse(options.body).model);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: 'ok' } }] }) };
+    };
+    const result = await chat([{ role: 'user', content: 'hi' }], 'openai');
+    assert.equal(result.model, 'zzz-unknown-9', 'the first model the provider reported is used');
+    assert.ok(!asked.some(m => !catalog.includes(m)), 'no model outside the provider list is ever requested');
+    assert.equal(describeModelConfig().candidateCount, 4);
   });
 
   it('lists models from an OpenAI-compatible endpoint', async () => {

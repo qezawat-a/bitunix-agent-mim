@@ -127,7 +127,9 @@ export async function setCommands() {
   return true;
 }
 
-export async function setMenuButton(url = CONFIG.MINI_APP_URL) {
+// The Telegram menu button is optional: without MINI_APP_URL the bot simply does
+// not set one. Nothing else in the bot depends on it.
+export async function setMenuButton(url = process.env.MINI_APP_URL || '') {
   const token = CONFIG.TELEGRAM_BOT_TOKEN;
   if (!token || !url) return false;
   let parsed;

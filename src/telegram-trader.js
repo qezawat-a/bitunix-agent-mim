@@ -208,31 +208,27 @@ export function createTraderCommands({ client, scanner, trader, agent, loadSessi
             ? 'auto-detect'
             : models.includes(CONFIG[configuredKey]) ? 'configured' : 'not found';
           const modelState = describeModelConfig();
-          const active = modelState.resolvedModel ? `\nactive: <code>${esc(modelState.resolvedModel)}</code> (${esc(modelState.source)}, ${modelState.candidateCount} candidates)` : '';
-          await sendMessage(chatId, `<b>${esc(provider)} models</b>\nconfigured: <code>${esc(CONFIG[configuredKey] || 'AUTO')}</code> (${configured})${active}\n${models.slice(0, 40).map(model => `<code>${esc(model)}</code>`).join('\n')}`);
+          const active = modelState.resolvedModel ? `\nactive: <code>${esc(modelState.resolvedModel)}</code> (${esc(modelState.source)}, ${modelState.candidateCount} from the provider)` : '';
+          const note = models.length ? '' : `\nwarning: no models read from the provider — ${esc(modelState.catalogError || 'check the gateway')}`;
+          await sendMessage(chatId, `<b>${esc(provider)} models</b>\nconfigured: <code>${esc(CONFIG[configuredKey] || 'AUTO')}</code> (${configured})${active}${note}\n${models.slice(0, 40).map(model => `<code>${esc(model)}</code>`).join('\n')}`);
           return true;
         }
         case 'setmodels': {
           let provider;
           try { provider = primaryProviderName(); } catch (error) { return usage(chatId, error.message); }
-          const requested = rest.join(' ').trim();
-          const value = requested || 'AUTO';
-          if (value.toUpperCase() !== 'AUTO') {
-            const models = await listProviderModelsFor(provider).catch(() => []);
-            // A model name is only rejected when the catalog is actually readable
-            // and does not contain it. If the gateway is down we accept the name,
-            // otherwise a flaky local proxy would make /setmodels unusable.
-            if (models.length && !models.includes(value)) {
-              return usage(chatId, `Model is not available. Use one of: ${models.slice(0, 20).join(', ')}`);
-            }
-            if (!models.length) {
-              await sendMessage(chatId, `Warning: the model catalog is currently unreadable, so <code>${esc(value)}</code> was accepted without verification.`);
-            }
-          }
+          const value = rest.join(' ').trim() || 'AUTO';
           const key = providerModelVar(provider);
-          CONFIG[key] = value.toUpperCase() === 'AUTO' ? 'AUTO' : value;
+          if (value.toUpperCase() !== 'AUTO') {
+            // Any name is accepted. The provider, not this code, decides which
+            // models the key may use — a local list here would only get in the way.
+            CONFIG[key] = value;
+            resetOpenAiModelCache();
+            await sendMessage(chatId, `${key} set to <code>${esc(value)}</code>. If the key may not use it, the next message says so and moves on to the next model the provider lists.`);
+            return true;
+          }
+          CONFIG[key] = 'AUTO';
           resetOpenAiModelCache();
-          await sendMessage(chatId, `${key} set to <code>${esc(CONFIG[key])}</code>.`);
+          await sendMessage(chatId, `${key} set to <code>AUTO</code> — models are read from the provider for this key.`);
           return true;
         }
         case 'harness': {

@@ -8,20 +8,23 @@
 // Internal message format is OpenAI-shaped:
 //   { role: 'system'|'user'|'assistant'|'tool', content, tool_calls?, tool_call_id? }
 //
-// MODEL SELECTION (the CRAG "auto" policy, kept intact):
+// MODEL SELECTION:
 //   1. detectProviders() lists every provider that has a key.
 //   2. An explicitly configured model is used as-is (no probing).
-//   3. With AI_MODEL=AUTO the catalog is read from <base>/models, ranked
-//      (free → cheap → rest, best family first) and each candidate is probed:
+//   3. Otherwise the catalog is read from <base>/models — the models this key
+//      can see — and probed in the order the provider returned them:
 //        Tier 1: does the model emit a real tool call?  (best for an agent)
 //        Tier 2: does the model answer plain text at all?
-//   4. If NO candidate answers the probe we still use the best-ranked
-//      candidate — a probe failure is not proof the model is unusable.
+//   4. If NO candidate answers the probe we still use the first one from the
+//      catalog. A probe failure is not proof the model is unusable.
 //   5. During the real request, a per-model failure (402/403 access denied,
-//      404 unknown model, quota) automatically advances to the next candidate.
-//   6. The winner is persisted to data/model-cache.json so restarts are cheap.
+//      404 unknown model, quota) automatically advances to the next model the
+//      provider listed, and models this key is denied are skipped.
 //
-// There are NO hardcoded fallback model names anywhere in this file.
+// There is no model list, ranking, or fallback list in this code. Everything
+// comes from the provider's own /models response for the key that was given.
+// The resolved model is remembered in memory only, so restarts re-ask the
+// provider instead of trusting a file on disk.
 import {
   detectProviders,
   geminiOpenAiBaseUrl,
@@ -31,13 +34,9 @@ import {
 } from './config.js';
 import {
   listProviderModels,
-  rankModels,
   isBalanceError,
   isAuthError,
   shouldAdvanceModel,
-  loadModelCache,
-  saveModelCache,
-  clearModelCache,
   resetModelCatalogCache,
   getLastCatalogError,
 } from './auto-model.js';
@@ -263,21 +262,18 @@ const modelState = new Map(); // "name|baseUrl" => { source, candidates, index, 
 const lastProbeFailure = new Map();
 const lastCatalogErrors = getLastCatalogError;
 
-// Forget everything held in memory (catalog + resolved model + probe log).
-// The on-disk winner in data/model-cache.json is kept, which is what happens on a
-// restart: the agent comes back on the last known-good model even if the gateway
-// is briefly unreachable.
+// Forget what is held in memory (catalog + resolved model + probe log) so the
+// next message asks the provider again. Nothing is stored on disk, so this is the
+// only kind of reset there is.
 export function resetModelState() {
   modelState.clear();
   lastProbeFailure.clear();
   resetModelCatalogCache();
 }
 
-// Full reset, including the persisted winner. Used by `/setmodels` so the next
-// message performs a completely fresh discovery.
+// Kept as the name the commands and the TUI already use.
 export function resetOpenAiModelCache() {
   resetModelState();
-  clearModelCache();
 }
 
 export function getModelState() {
@@ -319,24 +315,6 @@ async function ensureModelState(p, signal) {
     modelState.delete(key); // TTL expired — list + probe again
   }
 
-  if (!p.model) {
-    // Persisted winner from a previous run: no probing needed.
-    const persisted = loadModelCache(key);
-    if (persisted && (!refresh || Date.now() - (persisted.at || 0) < ttl)) {
-      const state = {
-        source: 'cache',
-        candidates: persisted.candidates || [persisted.chosen],
-        index: persisted.index || 0,
-        chosen: persisted.chosen,
-      };
-      state.at = Date.now();
-      modelState.set(key, state);
-      p.model = state.chosen;
-      console.log(`[auto-model] ${p.name}: model from cache = '${state.chosen}'`);
-      return state;
-    }
-  }
-
   let state;
   if (p.model) {
     // User pinned the model in .env — trusted, never probed.
@@ -350,34 +328,34 @@ async function ensureModelState(p, signal) {
       await new Promise(resolve => setTimeout(resolve, 1500));
       ids = await listProviderModels(p, { ttlMs: 0, signal });
     }
-    const ranked = ids.length ? rankModels(ids) : [];
-    if (!ranked.length) {
+    if (!ids.length) {
       throw new Error(
         `${p.name}: no models came back from GET ${p.baseUrl}/models` +
         `${catalogErrorHint()}. Check that the LLM gateway is running and that the key is accepted, or set the model explicitly.`,
       );
     }
-    const probed = await probeModels(p, ranked, signal);
-    // No probe passed → still try the best-ranked candidate. A failed probe is
-    // not proof that the model is unusable, and the request path below advances
-    // to the next candidate if this one is rejected.
-    const chosen = probed.chosen || firstUsable(ranked, probed.denied);
+    // The provider's own order is used exactly as returned. Nothing is filtered,
+    // re-sorted, or replaced by a fallback list.
+    const models = [...ids];
+    const probed = await probeModels(p, models, signal);
+    // No probe passed → still try the first usable model from the catalog. A
+    // failed probe is not proof that the model is unusable, and the request path
+    // below advances to the next listed model if this one is rejected.
+    const chosen = probed.chosen || firstUsable(models, probed.denied);
     state = {
       source: 'auto',
-      candidates: ranked,
+      candidates: models,
       // The probe already told us which models this key may not use, so the
       // request path skips them instead of discovering them one 401 at a time.
       denied: [...probed.denied],
-      index: ranked.indexOf(chosen) >= 0 ? ranked.indexOf(chosen) : 0,
+      index: models.indexOf(chosen) >= 0 ? models.indexOf(chosen) : 0,
       chosen,
     };
     console.log(
-      `[auto-model] ${p.name}: chosen '${chosen}' (from ${ranked.length} candidates, ` +
-      `${ids.length ? 'catalog OK' : 'catalog empty'}` +
-      `${probed.chosen ? '' : ', no probe passed — trying best-ranked'}` +
-      `${probed.denied.size ? `, ${probed.denied.size} denied by this key` : ''})`,
+      `[auto-model] ${p.name}: chosen '${chosen}' (from ${models.length} models reported by the provider` +
+      `${probed.chosen ? '' : ', no probe passed — trying the first usable one'}` +
+      `${probed.denied.size ? `, ${probed.denied.size} not usable with this key` : ''})`,
     );
-    if (chosen) saveModelCache(key, { chosen, candidates: ranked, index: state.index });
   }
 
   state.at = Date.now();
@@ -450,9 +428,9 @@ async function probeModels(p, candidates, signal) {
   return { chosen: '', denied };
 }
 
-// The best-ranked candidate this key is allowed to try.
-function firstUsable(candidates, denied) {
-  return candidates.find(mid => !denied.has(mid)) || candidates[0];
+// The first model in the provider's own list that this key is allowed to try.
+function firstUsable(models, denied) {
+  return models.find(mid => !denied.has(mid)) || models[0];
 }
 
 // " (last read: HTTP 503 from http://127.0.0.1:20128/v1/models)" — the actual
@@ -622,7 +600,7 @@ export async function listGeminiModels(signal) {
 export async function listModelsForActiveProvider(signal) {
   const provider = primaryProvider();
   const ids = await listProviderModels(provider, { ttlMs: 0, signal });
-  return { provider: provider.name, models: ids, ranked: rankModels(ids) };
+  return { provider: provider.name, models: ids, order: [...ids] };
 }
 
 // Force the next request to re-discover + re-probe (used by /setmodels).

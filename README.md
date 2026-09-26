@@ -19,23 +19,24 @@ explicitly switch with `/dryrun 0` and enable `/autotrade on` in Telegram.
 
 ## Model selection (`AI_MODEL=AUTO`)
 
-Ported from the CRAG agent, so the bot keeps talking instead of going quiet:
+You give the bot a key and a base URL. It asks **that provider** which models the
+key can see, and uses them:
 
-1. Every provider that has a key is a candidate (`AI_PROVIDER=auto`).
-2. An explicitly configured model is used as-is — no probing.
-3. With `AUTO` the catalog is read from `<base>/models`, ranked
-   (free → cheap → rest, best family first, non-chat models filtered out) and
-   each candidate is probed: first for a real tool call, then for any text reply.
-4. If **no** probe passes, the best-ranked candidate is still used — a failed
-   probe is not proof the model is broken. A rejected model (402/403 access
-   denied, 404 unknown model, quota) automatically advances to the next one, and
-   models the key may not use are skipped instead of retried.
-5. A rejected *key* (401 invalid key) fails fast with the provider's own message.
-6. The winning model is remembered in `data/model-cache.json`, so restarts do not
-   re-probe. There are no hardcoded fallback model IDs anywhere.
+1. `AI_PROVIDER=auto` treats every provider that has a key as a candidate.
+2. A model written in `AI_MODEL` is used exactly as given — no probing.
+3. With `AUTO` the agent calls `GET <AI_BASE_URL>/models` and probes the returned
+   models **in the order the provider listed them**: first for a real tool call,
+   then for any text reply.
+4. If no probe answers, the first usable model from that list is used anyway — a
+   failed probe is not proof the model is broken.
+5. A model the key is not allowed to use (402/403, 404, quota) is skipped and the
+   next model from the provider's list is tried. A rejected *key* (401 invalid
+   key) fails fast with the provider's own message.
+6. Nothing is written to disk and there is no fallback list: after a restart the
+   provider is asked again.
 
-`/models` shows the catalog plus the resolved model; `/diag` shows the provider,
-base URL, configured and resolved model, and the last real error.
+There is no hardcoded model ID, family list, ranking, or default model anywhere in
+the code. `/models` shows what the provider returned plus which model is active.
 
 ## Main features
 
